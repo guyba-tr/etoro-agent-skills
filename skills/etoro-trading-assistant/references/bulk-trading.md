@@ -127,7 +127,26 @@ Always send `Leverage: 1` unless the user explicitly asked for leverage (per `ap
 - Track requests-per-rolling-minute. If you're approaching 20, pause longer.
 - Don't parallelize. Bulk-fire is exactly what the rate limiter is designed to reject.
 
+### Response classification — at-most-once delivery
+
+**Trade-execution POSTs are not idempotent.** The eToro API has no idempotency key on `/market-open-orders/*` or `/market-close-orders/*`, so resending the same request after an ambiguous outcome can — and does — produce duplicate positions. Treat every trade request with the **at-most-once** discipline:
+
+| Outcome | Meaning | Action |
+|---|---|---|
+| **HTTP 200 / 201** with a body containing an `orderId` (or equivalent) | Server accepted and recorded the order | **Done. Don't resend. Move on.** |
+| **HTTP 4xx** (except 429) — `400`, `403`, `404`, etc. | Server rejected the request explicitly; nothing was placed | Log as failed; safe to surface to the user; **do not retry the same payload** (a 400 won't become a 200) |
+| **HTTP 401** | Credentials invalid | **STOP the entire batch.** See "Per-trade failure handling" below. |
+| **HTTP 429** | Rate-limited; server explicitly told you it didn't process | Safe to retry (the only safe retry case) — see "429 backoff" below |
+| **HTTP 5xx** with a body | Server processed and failed | Log as failed; **do not retry** — you don't know whether the order was placed before the failure |
+| **Timeout / connection reset / no response / parse error** | Truly ambiguous — the order may or may not have been placed | **Do not retry.** Mark the trade as ambiguous, continue the batch, and let §5 verification reconcile it via `/pnl` |
+
+**Why "do not retry" on ambiguous and 5xx outcomes:** the request might have reached the server, executed, and the response was lost on the way back. A retry in that case opens a duplicate position — the exact failure mode users hit. A missing position is recoverable (verify, then place it again deliberately); a duplicate is messy to unwind.
+
+The only response that justifies a same-payload retry is **429** (the server explicitly tells you it didn't process the request). Everything else either succeeded, failed cleanly, or is ambiguous — and ambiguous gets resolved at verification time, not by hopeful re-firing.
+
 ### 429 backoff
+
+429 is the **one** retry-safe failure mode (the server explicitly states the request wasn't processed):
 
 - First 429: wait **15 seconds**, retry the same trade.
 - Second 429 on the same trade: wait **30 seconds**, retry.
@@ -137,26 +156,46 @@ Always send `Leverage: 1` unless the user explicitly asked for leverage (per `ap
 ### Per-trade failure handling
 
 - **401 errors: STOP the entire batch immediately.** A 401 means the API credentials are no longer valid — typically the user revoked their `x-user-key` mid-session. Subsequent trades would all fail with the same error. **Do not continue.** Report which trades succeeded BEFORE the 401 explicitly to the user — naming each instrument and amount — and ask them to provide a new key. **Never describe the build as "complete" when it isn't.** See `sso-and-session.md` §§3–4 for the full recovery flow and communication template.
-- **Other non-429 errors (400, 500, etc.) on an individual order:** log, capture the failure, **continue with the remaining trades**. Don't abort the whole batch — partial success is more useful than nothing. (These are per-trade problems — bad parameters, transient server errors — not credential failures, so subsequent trades may still succeed.)
-- Capture per-trade outcomes:
+- **Other non-429 errors (400, 5xx) on an individual order:** log, capture the failure, **continue with the remaining trades**. Don't abort the whole batch — partial success is more useful than nothing. **Do not retry these** (per the at-most-once rule above); reconcile their actual state at verification.
+- **Ambiguous outcomes (timeout, connection drop):** log as `ambiguous`, continue the batch. Verification in §5 determines whether the order actually landed.
+- Capture per-trade outcomes — note the four-state status (not just ok/failed):
 
 ```typescript
+type TradeStatus =
+  | 'ok'         // explicit 2xx with orderId
+  | 'failed'     // explicit 4xx/5xx response
+  | 'ambiguous'  // no response, timeout, connection reset — actual outcome unknown
+  | 'rate_limited_giveup'; // 429 retried 3× and still failed
+
 const results: Array<{
   symbol: string;
-  status: 'ok' | 'failed';
+  status: TradeStatus;
   error?: string;
 }> = [];
 
 for (const trade of plan.trades) {
   await sleep(3000); // pacing
   try {
-    await openPosition(trade.instrumentId, trade.amountUsd, trade.isBuy ?? true);
-    results.push({ symbol: trade.symbol, status: 'ok' });
+    const res = await openPosition(trade.instrumentId, trade.amountUsd, trade.isBuy ?? true);
+    if (res.orderId) {
+      results.push({ symbol: trade.symbol, status: 'ok' });
+    } else {
+      results.push({ symbol: trade.symbol, status: 'ambiguous', error: 'unexpected response shape' });
+    }
   } catch (err) {
     if (err.statusCode === 429) {
-      // exponential backoff loop, max 3 retries
+      // exponential backoff loop (15s -> 30s -> 60s), max 3 retries
+      // on giveup: results.push({ symbol, status: 'rate_limited_giveup' })
+    } else if (err.statusCode === 401) {
+      // STOP the entire batch — see "Per-trade failure handling" 401 rule above
+      throw err;
+    } else if (err.statusCode >= 400 && err.statusCode < 600) {
+      // explicit error response — log, do NOT retry, continue batch
+      results.push({ symbol: trade.symbol, status: 'failed', error: `HTTP ${err.statusCode}: ${err.message}` });
     } else {
-      results.push({ symbol: trade.symbol, status: 'failed', error: err.message });
+      // network error, timeout, connection reset, no response — outcome is ambiguous
+      // do NOT retry — verification in §5 will reconcile
+      results.push({ symbol: trade.symbol, status: 'ambiguous', error: err.message });
     }
   }
 }
@@ -166,7 +205,7 @@ for (const trade of plan.trades) {
 
 ## 5. Verify the orders landed
 
-A successful POST does **not** mean the position is open — it means the order was accepted. Three landing states are possible.
+A successful POST does **not** mean the position is open — it means the order was accepted. Three landing states are possible — and verification is **also** how the at-most-once rule resolves any `ambiguous` trades from §4.
 
 After the last execution, **wait 60 seconds** for the PnL cache to refresh, then:
 
@@ -181,6 +220,15 @@ Compare against the plan:
 | **Filled** | `positions[]` (find matching `instrumentID`) | Order executed; user has a real position | "Position opened" |
 | **Pending market open** | `ordersForOpen[]` (matching `instrumentID`) | Order accepted but markets are closed (e.g. stocks on weekend or out-of-hours) | "Pending — will fill when market opens" |
 | **Failed / unknown** | Neither array | API error, validation failure, or order silently dropped | "Failed — please re-review" |
+
+### Reconciling ambiguous trades
+
+For every trade marked `ambiguous` in §4, check whether it appears in `positions[]` or `ordersForOpen[]`:
+
+- **Found in either array** → the order *did* land despite the ambiguous response. Reclassify as filled or pending. **Do not** place another order — that's the duplicate-prevention point.
+- **Not found in either array** → the order didn't land. Now (and only now) is it safe to ask the user whether to retry it as a fresh trade. Surface it as ambiguous-but-missing in the report so the user can decide.
+
+This is the entire point of the at-most-once + post-batch verification pattern: ambiguity is resolved by reading state, not by re-firing requests.
 
 ### Communication template
 
@@ -217,7 +265,8 @@ If anything failed, surface the failures explicitly with the error reason and su
 - [ ] ≤ 20 instruments recommended (warn the user if more).
 - [ ] All `instrumentID`s resolved up front; partial-resolution plans rejected entirely.
 - [ ] Trade-execution requests spaced ≥3s; 429 handled with 15s → 30s → 60s backoff; per-trade limit of 3 retries.
+- [ ] **At-most-once delivery enforced**: only 429 triggers a same-payload retry. 4xx (except 429), 5xx, and ambiguous outcomes (timeout / connection drop / no response) are never retried — they're reconciled at verification time via `/pnl`. This is the duplicate-position prevention rule.
 - [ ] **On 401: stop the entire batch immediately, report which trades succeeded before the failure, ask for a new credential.** Never report the batch as "complete" when it isn't.
-- [ ] Other per-trade failures (400, 500) are logged and reported but don't abort the batch.
-- [ ] Post-execution: 60s wait, then `/pnl` re-read; results categorized as filled / pending / failed against the plan.
+- [ ] Other per-trade failures (400, 5xx) are logged and reported but don't abort the batch and are never retried.
+- [ ] Post-execution: 60s wait, then `/pnl` re-read; results categorized as filled / pending / failed / ambiguous-but-missing against the plan; ambiguous trades resolved by checking `positions[]`/`ordersForOpen[]`, never by re-firing.
 - [ ] User-facing report uses **the same unit the user gave you** (dollars on regular accounts; percentages in agent-portfolio context); pending-market-open distinction explicitly surfaced.

@@ -72,12 +72,17 @@ The same logical entity (a position) appears as `instrumentID` in PNL responses 
 
 ## Rate limits and error response classes
 
-A breached rate limit returns HTTP **429**. Distinguish 429s from 5xx and from 413/414 (payload too large) — they require different recovery strategies:
+A breached rate limit returns HTTP **429**. Distinguish 429s from 5xx and from 413/414 (payload too large) — they require different recovery strategies. **Crucially, the recovery strategy depends on whether the endpoint is a read or a write.**
 
-- **429** → backoff and retry at the same payload size (smaller payloads don't help).
-- **413/414** → halve the payload and retry (typical on `/market-data/instruments` with too many IDs).
-- **5xx** → short exponential backoff and retry (e.g. 200ms → 600ms → 1500ms).
-- **401** → refresh access token once; if refresh fails with `invalid_grant`, the session is dead (see `sso-and-session.md`).
+| Status | Read endpoints (`GET /market-data/*`, `/trading/info/*`, `/user-info/*`, `/agent-portfolios`) | Write / trade-execution endpoints (`POST /trading/execution/*`, `/agent-portfolios`) |
+|---|---|---|
+| **429** | Backoff and retry at the same payload size (smaller payloads don't help) | Backoff and retry — explicit "not processed" signal, safe to retry. See `bulk-trading.md` §4 "429 backoff" for the 15s → 30s → 60s cadence |
+| **413 / 414** | Halve the payload and retry (typical on `/market-data/instruments` with too many IDs) | N/A (trade-execution payloads are tiny) |
+| **5xx** | Short exponential backoff and retry (e.g. 200ms → 600ms → 1500ms) | **Do NOT retry.** The order may have executed before the failure; retrying duplicates it. Log as failed, reconcile via `/pnl`. See `bulk-trading.md` §4 "Response classification — at-most-once delivery" |
+| **Timeout / connection drop / no response** | Safe to retry (idempotent reads) | **Do NOT retry — outcome is ambiguous.** Mark the trade and reconcile via `/pnl`. Same reference as above |
+| **401** | Refresh access token once; if refresh fails with `invalid_grant`, the session is dead (see `sso-and-session.md`) | STOP the workflow immediately — never assume execution continued. See `sso-and-session.md` §§3–4 |
+
+The rule for write endpoints comes from the fact that **eToro's trade-execution endpoints have no idempotency key**: the only guaranteed-safe retry response is `429` (the server explicitly tells you it didn't process the request). For everything else on a write, prefer "verify state, then place again deliberately if needed" over "fire again and hope."
 
 For agent-portfolio trading endpoints there is an additional **20 req/min** trade-execution limit — see the `etoro-agent-portfolios` skill.
 

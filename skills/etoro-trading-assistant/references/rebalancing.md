@@ -203,6 +203,7 @@ Use the same execution patterns as `bulk-trading.md` §4:
 - Pace ≥ 3 seconds between requests.
 - 429 backoff: 15s → 30s → 60s, max 3 retries per trade.
 - Continue on individual non-429 failures; capture for the final report.
+- **At-most-once delivery applies to closes too** (per `bulk-trading.md` §4 "Response classification"). Only 429 is retried; 4xx/5xx and ambiguous responses (timeout, connection drop) are logged as failed/ambiguous and reconciled at the §6 verification step by reading `positions[]`. Never re-fire a close on ambiguity — a duplicate close on a partial-close payload can over-liquidate the position.
 - **On 401: STOP the entire rebalance immediately** (per `bulk-trading.md` and `sso-and-session.md` §§3–4). Don't continue into Phase 2 — all subsequent trades will fail with the same error. Report which closes succeeded and that the rebalance is incomplete; never describe a rebalance as "done" when it isn't.
 
 **The 20 req/min rate-limit budget is shared across opens AND closes** — track total trade-execution requests across both phases of this single rebalance.
@@ -259,6 +260,7 @@ Current allocation matches your target within $40 (or, in agent-portfolio contex
 - [ ] Diff is computed against current state (in dollars or weights, matching the user's target unit).
 - [ ] Target plan validated like a fresh bulk plan: not mixed-unit, sum ≤ available cash (or ≤ 100%), ≤ 20 instruments, all `instrumentID`s resolved.
 - [ ] Phase 1 (closes) completes BEFORE Phase 2 (opens) begins.
+- [ ] **At-most-once delivery on every POST in both phases** — only 429 is retried; 4xx/5xx/ambiguous are reconciled by reading `/pnl`, never by re-firing. Especially important on closes: a duplicated partial close can over-liquidate the position.
 - [ ] **60-second PnL cache wait between phases** — non-negotiable.
 - [ ] Available cash re-verified after closes; missing cash investigated (silent close failure? pending orders?) before proceeding.
 - [ ] Rate-limit budget tracked across BOTH phases; no assumption of a fresh 20/min after the cache wait.

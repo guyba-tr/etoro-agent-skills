@@ -163,6 +163,12 @@ See `api-conventions.md` "Limit orders" for:
 
 Per `api-conventions.md` "Other optional parameters", omit anything the user didn't ask for. The single exception is `Leverage: 1` — send it explicitly even when unspecified, to avoid accidental leveraged positions if eToro ever changes the default for a particular instrument.
 
+#### At-most-once: never retry on ambiguity
+
+Trade-execution POSTs are not idempotent. If the response is **2xx with an order ID**, the trade is done — move on. If it's an **explicit error** (4xx other than 429, or 5xx with a body), log it and stop — *do not retry the same payload*. If the outcome is **ambiguous** (timeout, connection reset, no response, parse error), assume the trade may have landed: **do not retry** — go straight to Step 7 verification and check `positions[]` / `ordersForOpen[]`. Only **429** is a safe-to-retry response (the server explicitly told you it didn't process the request).
+
+A duplicate position is far worse than a missing one — the missing case is recoverable by deliberately re-placing after verification; the duplicate has already executed. Full classification table and rationale: `bulk-trading.md` §4 "Response classification — at-most-once delivery".
+
 ### Step 7 — Verify the order landed
 
 A successful POST means the order was **accepted**, not necessarily filled. Three landing states are possible:
@@ -209,6 +215,7 @@ Include side effects when meaningful (e.g. *"Available cash dropped from $8,000 
 - [ ] For closes: `positionId` looked up from `positions[]`, not assumed; if multiple positions exist on the same instrument, the user picked which one.
 - [ ] User confirmed the trade in plain language before POST (unless auto-execute is opted in).
 - [ ] `Leverage: 1` sent explicitly when not specified.
+- [ ] **At-most-once: only 429 is retried; 4xx/5xx and ambiguous outcomes are reconciled by reading `positions[]`, never by re-firing the same payload.**
 - [ ] Post-execution: `/pnl` re-read and trade categorized as filled / pending / failed; pending-market-open distinction surfaced.
 - [ ] Outcome reported in the user's original framing (their dollars or their units), with meaningful side effects (e.g. cash impact) noted.
 
