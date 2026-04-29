@@ -68,8 +68,21 @@ The same logical entity (a position) appears as `instrumentID` in PNL responses 
 - **Demo endpoints** contain `/demo/` in the path (e.g. `/trading/info/demo/pnl`). Use for testing and paper trading.
 - **Real endpoints** omit `/demo/` (or use `/real/` where the URL is environment-scoped). Use for live trading.
 - A user-key is **bound to one environment at creation** (Real or Virtual, set in <https://www.etoro.com/settings/trade>). Sending a real-environment key to a `/demo/` endpoint, or vice versa, returns 401 or `InsufficientPermissions`.
-- **Don't ask the user which environment their key is for** — determine it from the key. The simple rule: try the `/real/` (or no-prefix) endpoint first; on `InsufficientPermissions`, retry the equivalent `/demo/` endpoint and remember the environment for the rest of the session. Most main-account user-keys, and **all** agent-portfolio user-tokens, are real.
 - **`/trading/info/trade/history` requires a real-environment credential.** Demo keys / demo SSO tokens return `InsufficientPermissions`; surface a specific error rather than treating it as a generic auth failure.
+
+### Determining the key's environment — don't ask the user
+
+The user-key is bound to one environment at creation, so the agent should never ask. Determine it by probing `/trading/info/real/pnl` once at session start:
+
+```
+GET /trading/info/real/pnl
+  ├─ 200 OK                       → key is REAL    → use /real/ endpoints for the rest of the session
+  └─ 403 InsufficientPermissions  → key is DEMO    → use /demo/ endpoints for the rest of the session
+```
+
+Cache the result in working memory; you don't need to re-probe per request. Any other status code (401, 5xx, network error) is **not** an environment signal — handle per the rules in `execution-invariants.md` §§3–4 and the rate-limit/error table below.
+
+All **agent-portfolio user-tokens are real** by definition (agent-portfolios always live in the real environment) — for those you can skip the probe and use `/real/` directly. Most **main-account user-keys** are also real, but you must probe to be sure.
 
 ## Rate limits and error response classes
 
