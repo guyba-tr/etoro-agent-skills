@@ -154,6 +154,10 @@ The `dispatchAction` call goes through `single-trade-walkthrough.md`'s flow — 
 - Pre-flight available cash for `open` and `increase_to` actions.
 - Use `UnitsToDeduct` correctly for `partial_close` and `reduce_to`.
 
+**Anchor freeze at trigger-fire time.** Each `dispatchAction` invocation IS a workflow — read `/pnl` fresh and freeze `EQUITY_ANCHOR` + `CASH_ANCHOR` per `bulk-trading.md` §2, exactly as you would for a one-shot trade. **Do NOT** carry an anchor over from one trigger to the next — between fires, the market drifts and so does equity. Each trigger gets its own anchor, valid only for that single dispatch.
+
+For percentage-form rules (`size: { weight: 0.025 }` on agent-portfolios, common case), apply the ceiling rule: `amount_usd = floor(weight × EQUITY_ANCHOR × 100) / 100`. Per `bulk-trading.md` §4 "Sizing — stated allocations are CEILINGS", floor never round; verify against the anchor (not against current equity) post-fill; over-fills get a corrective partial close.
+
 ---
 
 ## 5. Safety controls
@@ -238,6 +242,8 @@ Rule triggered: AAPL fell below $180 → opened 2.5% allocation.
 - [ ] Live-price triggers use `/market-data/instruments/rates`; PnL-based triggers use the PnL endpoint at its 60s cadence.
 - [ ] Cooldown set on every rule (default 1h) to prevent rapid re-firing.
 - [ ] `max_triggers` defaulted to 5 unless user requested otherwise.
+- [ ] **Each `dispatchAction` freezes its own `EQUITY_ANCHOR` + `CASH_ANCHOR` from a fresh `/pnl` read** — never carried over from a previous trigger or from rule creation.
+- [ ] **For percentage-form rules: stated weight is a CEILING** — `amount_usd = floor(weight × EQUITY_ANCHOR × 100) / 100`; over-fills are surfaced and corrected (per `bulk-trading.md` §5).
 - [ ] Daily global trigger budget tracked; high-volume rules paused before they consume the whole 20 req/min trade-execution limit.
 - [ ] Pending-market-open status surfaced when the triggered trade can't fill immediately.
 - [ ] Communication uses the user's unit (dollars on regular accounts; percentages in agent-portfolio context); units consistent throughout the rule's lifecycle.

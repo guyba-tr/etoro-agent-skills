@@ -61,6 +61,17 @@ Source guides (authoritative — refer to these if a formula needs to evolve):
 - <https://api-portal.etoro.com/guides/calculate-profit-loss>
 - <https://api-portal.etoro.com/guides/calculate-equity>
 
+### Stability of these values between snapshots
+
+Assuming **single-actor mode** (no other client opens or closes positions on this account):
+
+- **Available Cash is STABLE** between trades — it changes only when the agent itself opens, closes, or modifies a position (or when an `ordersForOpen` order fills). If you read it now and don't trade, it'll be the same value next time you read it.
+- **Total Invested is STABLE** by the same logic — it's the sum of position cost-bases, which only change on open/close.
+- **Profit/Loss DRIFTS continuously** with market price movements on open positions. Even with no trading activity, this number changes second-to-second.
+- **Equity DRIFTS** because it includes Profit/Loss. Same reason.
+
+This matters for any workflow that expresses intent as a percentage (*"30% in BTC"*). Because equity drifts, recomputing `pct × current_equity` mid-workflow produces a different dollar amount than it did at the start — making the same intent resolve to different numbers depending on timing. **For workflows requiring percentage stability, freeze `EQUITY_ANCHOR` (and `CASH_ANCHOR`) at workflow start and use them for all sizing, sufficiency, and verification.** See `bulk-trading.md` §2, `rebalancing.md` §1, and `etoro-agent-portfolios` SKILL "freeze equity and cash at workflow start" for the full pattern.
+
 ## 2. `position.openRate` is in the instrument's NATIVE currency
 
 For **non-USD** instruments (e.g. `BP.L` quoted in pence, SEK / NOK / HKD / etc.), `openRate` is in that instrument's native currency, **not USD**. To get the USD-equivalent price for cash positions:

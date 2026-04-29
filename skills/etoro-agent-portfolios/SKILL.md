@@ -34,19 +34,40 @@ When the user creates one, they specify an `investmentAmountInUsd` which is **re
 
 The agent trades on behalf of the agent-portfolio using **the agent-portfolio's own user token**. All endpoints are the **real** Public API endpoints (no `/demo/` segment); agent-portfolios are real accounts.
 
-## CRITICAL — always check current equity/cash first
+## CRITICAL — freeze equity and cash at workflow start
 
-This is the strict, agent-portfolio-specific application of the general "Check current equity / cash before any trade workflow" rule in `etoro-trading-assistant`'s SKILL.md. It's **non-negotiable** because user intents are expressed as percentages and the only way to size them correctly is to read the live equity.
+This is the strict, agent-portfolio-specific application of the general "Check current equity / cash before any trade workflow" rule in `etoro-trading-assistant`'s SKILL.md. It's **non-negotiable** because user intents are expressed as percentages and the only way to size them correctly is to anchor on a single, locked equity value.
 
 Before starting **any** workflow on an agent-portfolio (single trade, bulk build, rebalance, conditional rule, status report), call:
 
 ```
-GET /trading/info/real/pnl
+pnl = GET /trading/info/real/pnl   // x-user-key = the agent-portfolio's userToken
 ```
 
-with the agent-portfolio's `userToken` as `x-user-key`. Use the formulas in `etoro-trading-assistant`'s `references/account-snapshot.md` to compute Available Cash and Equity. These numbers are essential **internal context** — you need the equity in dollars to compute the `Amount` field for any API call (a "5% in AAPL" intent becomes `Amount = 0.05 × equity_usd`) — but they are **never** disclosed to the user.
+Then **freeze two anchors that don't change for the duration of the workflow**, per `etoro-trading-assistant`'s `references/bulk-trading.md` §2:
 
-Don't reuse equity values from earlier in the conversation; positions move and the equity changes. Re-read `/pnl` at the start of each workflow.
+```
+EQUITY_ANCHOR = equity(pnl)         // unit of user intent: "X%" means X% × EQUITY_ANCHOR
+CASH_ANCHOR   = available_cash(pnl) // execution constraint at workflow start
+```
+
+Use the formulas in `references/account-snapshot.md` to compute both. Use these for ALL sizing decisions in the workflow — the `Amount` field on every API call is `floor(pct × EQUITY_ANCHOR × 100) / 100`. These numbers are essential **internal context**; they are **never** disclosed to the user.
+
+**Why freeze.** Equity drifts with market movement on existing positions; cash is stable in single-actor mode. Re-computing `pct × current_equity` mid-flow makes the same percentage intent resolve to different dollar amounts depending on timing — and post-fill percentages slide too. Freezing makes percentages deterministic and verifiable.
+
+Don't reuse anchors from earlier in the conversation. Each new workflow gets its own fresh `/pnl` read and its own anchors.
+
+## CRITICAL — stated percentages are CEILINGS
+
+Every percentage in the user's intent is an **upper bound**, not a target. The actual filled allocation must be ≤ the stated figure. **Always under-fill rather than over-fill** — a small under-allocation is invisible and recoverable; an over-allocation requires an unwinding partial close, surprises the user, and may incur fees on the corrective trade.
+
+Mechanics (full version in `etoro-trading-assistant`'s `references/bulk-trading.md` §4 "Sizing — stated allocations are CEILINGS"):
+
+1. **Floor when converting**: `amount_usd = floor(pct × EQUITY_ANCHOR × 100) / 100`. Never round up; never round to "nice numbers" like $300 when math gives $295.40.
+2. **Cumulative check** before each send: `spent_so_far + next_amount ≤ Σ planned_amounts ≤ CASH_ANCHOR`. If violated, abort and recompute — do not silently shrink-and-fire.
+3. **Verify against `EQUITY_ANCHOR`** after fill, NOT against current equity. `position.amount > floor(stated_pct × EQUITY_ANCHOR × 100) / 100` indicates an agent-side bug — surface it and offer a corrective partial close.
+
+The mirror-image rule for **closes** (when freeing cash via the rebalancing flow) is: round UP, not down — see `references/rebalancing.md` §A "Insufficient-cash variant" for the 1%-of-shortfall buffer that prevents under-closing.
 
 ## CRITICAL — user-facing numbers rule (the override)
 
@@ -218,7 +239,10 @@ See `etoro-trading-assistant`'s `references/sso-and-session.md` §§3–4 for th
 ## Sanity checks
 
 - [ ] Every user-facing number is a percentage of equity, never a dollar amount from the agent-portfolio's equity or position sizes.
-- [ ] Before each workflow, current equity and Available Cash are read live from `/pnl` — not assumed, not carried over from earlier in the conversation.
+- [ ] Before each workflow, `/pnl` is read fresh and `EQUITY_ANCHOR` + `CASH_ANCHOR` are FROZEN for the workflow's duration. Anchors are never recomputed mid-workflow; sizing always references them, not current equity.
+- [ ] **Stated percentages are CEILINGS**: `amount_usd = floor(pct × EQUITY_ANCHOR × 100) / 100` — floored, never rounded up. Over-fills are surfaced and corrected via partial close (per `references/bulk-trading.md` §5).
+- [ ] **Closes round UP** (rebalancing.md insufficient-cash variant): close at least `shortfall + 1% of shortfall` to avoid landing short and triggering a corrective second round.
+- [ ] User-facing percentages are computed against `EQUITY_ANCHOR`, not current equity — so the same intent resolves to the same number regardless of when the user looks.
 - [ ] The hardcoded `x-api-key` (per `api-conventions.md`) is used; the user is never asked for it.
 - [ ] `userToken` is presented to the user exactly once at portfolio creation, with explicit storage instructions.
 - [ ] After creation, all execution flows are loaded from `etoro-trading-assistant` (single trade, bulk, rebalance, conditional rules) — not handled inline here.

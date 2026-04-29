@@ -169,6 +169,17 @@ Trade-execution POSTs are not idempotent. If the response is **2xx with an order
 
 A duplicate position is far worse than a missing one — the missing case is recoverable by deliberately re-placing after verification; the duplicate has already executed. Full classification table and rationale: `bulk-trading.md` §4 "Response classification — at-most-once delivery".
 
+#### Sizing — stated percentages are CEILINGS
+
+When the user expresses intent as a percentage (*"buy 5% of equity in BTC"*) — common on agent-portfolios, occasional on regular accounts — the stated percentage is an **upper bound**, not a target. Apply the same anchor-and-floor rule from `bulk-trading.md` §§ 2 + 4:
+
+```
+EQUITY_ANCHOR = equity from a fresh /pnl read at the start of this trade
+amount_usd    = floor(pct × EQUITY_ANCHOR × 100) / 100
+```
+
+Send `Amount: amount_usd` exactly. Never round up to a "nicer" number. Since eToro has no amount-slippage, the resulting `position.amount / EQUITY_ANCHOR` lands at or just under the stated cap — never above. After Step 7 verification, if `position.amount` somehow exceeds the floored expected amount, treat it as an agent-side bug and offer a corrective partial close (per `bulk-trading.md` §5 "Over-allocation check"). For dollar-form intents the same discipline applies in mirror image — *"buy $300 of BTC"* means send `$300` exactly, not `$305` for cleanliness.
+
 ### Step 7 — Verify the order landed
 
 A successful POST means the order was **accepted**, not necessarily filled. Three landing states are possible:
@@ -215,8 +226,9 @@ Include side effects when meaningful (e.g. *"Available cash dropped from $8,000 
 - [ ] For closes: `positionId` looked up from `positions[]`, not assumed; if multiple positions exist on the same instrument, the user picked which one.
 - [ ] User confirmed the trade in plain language before POST (unless auto-execute is opted in).
 - [ ] `Leverage: 1` sent explicitly when not specified.
+- [ ] **For percentage intents: `amount_usd = floor(pct × EQUITY_ANCHOR × 100) / 100`** with `EQUITY_ANCHOR` from a fresh `/pnl` read at trade start; never rounded up; the stated percentage is a CEILING.
 - [ ] **At-most-once: only 429 is retried; 4xx/5xx and ambiguous outcomes are reconciled by reading `positions[]`, never by re-firing the same payload.**
-- [ ] Post-execution: `/pnl` re-read and trade categorized as filled / pending / failed; pending-market-open distinction surfaced.
+- [ ] Post-execution: `/pnl` re-read and trade categorized as filled / pending / failed; pending-market-open distinction surfaced. For percentage intents, `position.amount ≤ floor(pct × EQUITY_ANCHOR × 100) / 100`; over-fill triggers a corrective partial close (per `bulk-trading.md` §5).
 - [ ] Outcome reported in the user's original framing (their dollars or their units), with meaningful side effects (e.g. cash impact) noted.
 
 ## References used by this walkthrough

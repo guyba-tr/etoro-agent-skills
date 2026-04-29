@@ -37,8 +37,10 @@ Reject plans that **mix the two forms** (e.g. "AAPL at 25%, MSFT at $1,500") —
 
 ### Sufficiency check
 
-- **For dollar plans:** `Σ planned dollars ≤ available cash`. If not, reject and surface the gap.
-- **For percentage plans:** `Σ percentages ≤ 100%`. If less than 100% and no explicit cash entry, treat the remainder as cash buffer (don't auto-deploy). If more than 100%, reject. Then *also* verify `Σ amount_usd ≤ available cash` once converted — a percentage plan can pass the 100% check but still fail the cash check if pending orders / mirrors are tying up funds.
+These checks happen against the frozen anchors from §2 (read `/pnl` first if you haven't already; both phases of validation use the same snapshot).
+
+- **For dollar plans:** `Σ planned dollars ≤ CASH_ANCHOR`. If not, reject and surface the gap.
+- **For percentage plans:** `Σ percentages ≤ 100%`. If less than 100% and no explicit cash entry, treat the remainder as cash buffer (don't auto-deploy). If more than 100%, reject. Then *also* verify `Σ amount_usd ≤ CASH_ANCHOR` once converted — a percentage plan can pass the 100% check but still fail the cash check if pending orders / mirrors are tying up funds.
 
 ### Instrument count
 
@@ -55,21 +57,28 @@ Reject plans that **mix the two forms** (e.g. "AAPL at 25%, MSFT at $1,500") —
 
 ---
 
-## 2. Pre-flight: check equity and cash
+## 2. Anchor equity and cash for the workflow
 
-Before any open, fetch the current account state:
+Before sizing or executing anything, fetch the account state and **freeze two anchors** that don't change for the duration of this workflow:
 
 ```
-GET /trading/info/{env}/pnl
+pnl = GET /trading/info/{env}/pnl
+
+EQUITY_ANCHOR = equity(pnl)         // unit of user intent: "X% in symbol Y" means X% × EQUITY_ANCHOR
+CASH_ANCHOR   = available_cash(pnl) // execution constraint at workflow start
 ```
 
-Compute Available Cash and Equity using the formulas in `account-snapshot.md` §1.
+Use the formulas in `account-snapshot.md` §1 to compute both. **Neither value is recomputed mid-workflow** — every sizing decision, every cumulative check, and every post-fill verification compares against these frozen numbers.
 
-`total_planned = Σ(amount_usd)`. If `total_planned > available_cash`:
+> **Why freeze.** Equity drifts with market movement on existing positions; cash is stable in single-actor mode (no other client opening or closing positions on the account). If the agent recomputed `pct × current_equity` mid-flow, the same "30% in BTC" intent would resolve to different dollar amounts depending on when the calculation ran — and the post-fill percentage would slide too. Freezing makes percentages deterministic and verifiable.
+
+### Sufficiency check
+
+`total_planned = Σ(amount_usd)` where each `amount_usd = floor(pct × EQUITY_ANCHOR × 100) / 100` (see §4 Sizing). If `total_planned > CASH_ANCHOR`:
 
 - **Initial build on a regular account**: tell the user the gap in dollars (e.g. *"You're trying to deploy $8,000 but only $5,000 is available."*) and ask them to revise.
 - **Initial build on an agent-portfolio**: same constraint, expressed in percentages per the agent-portfolios override.
-- **A new trade hitting cash shortfall on an existing portfolio**: that's a rebalance trigger — load `rebalancing.md` and use the "Insufficient-cash variant."
+- **A new trade hitting cash shortfall on an existing portfolio**: that's a rebalance trigger — load `rebalancing.md` and use the "Insufficient-cash variant" (it spells out the close-with-buffer mechanic to free the missing cash without forcing a second rebalance round).
 
 ---
 
@@ -120,6 +129,26 @@ POST /trading/execution/{env}/market-open-orders/by-amount
 (Note `InstrumentID` capital `D` in the request body — see `api-conventions.md` casing notes.)
 
 Always send `Leverage: 1` unless the user explicitly asked for leverage (per `api-conventions.md`).
+
+### Sizing — stated allocations are CEILINGS, not targets
+
+Every percentage and dollar amount the user agreed to is an **upper bound**. The actual filled allocation must be ≤ the stated figure. **Always under-fill rather than over-fill** — a small under-allocation is invisible and recoverable; an over-allocation requires an unwinding partial close, surprises the user, and can incur fees/spread on the corrective trade.
+
+**Three rules together guarantee the ceiling:**
+
+1. **Floor when converting percentage → dollars.** Anchor on `EQUITY_ANCHOR` from §2 (NOT current equity). Floor to cents — never round to a "nice number" like $300 when the math gives $295.40.
+   ```
+   amount_usd = floor(pct × EQUITY_ANCHOR × 100) / 100
+   ```
+2. **Cumulative check before each send.** Maintain `spent_so_far`. Before firing trade `i`, verify:
+   ```
+   spent_so_far + amount_usd[i] ≤ Σ planned amount_usd  (= total_planned from §2)
+   spent_so_far + amount_usd[i] ≤ CASH_ANCHOR
+   ```
+   If either constraint would be violated, that's an arithmetic bug in the planner — abort the batch and recompute, do **not** silently shrink-and-fire (the user agreed to a specific plan).
+3. **Send the floored dollar amount.** Since eToro has no amount-slippage (`Amount: $X → position.amount = $X` exactly), the floored amount IS the exact filled value. The percentage of `EQUITY_ANCHOR` lands at or just under the stated cap.
+
+For **dollar-form plans** the same discipline applies in mirror image — the user's stated dollar figure is the ceiling. Don't round up "$295" to "$300" for cleanliness; send `$295` exactly.
 
 ### Pacing
 
@@ -230,6 +259,32 @@ For every trade marked `ambiguous` in §4, check whether it appears in `position
 
 This is the entire point of the at-most-once + post-batch verification pattern: ambiguity is resolved by reading state, not by re-firing requests.
 
+### Over-allocation check (against the frozen anchor)
+
+For every position that landed in `positions[]`, verify the actual fill against the §2 anchor and the §4 sizing rule:
+
+```
+expected_amount = floor(stated_pct × EQUITY_ANCHOR × 100) / 100   // or the user's stated dollar figure for dollar plans
+actual_amount   = position.amount
+
+if actual_amount > expected_amount:
+  // CEILING VIOLATION — the agent's own arithmetic produced an over-allocation.
+  // Surface it AND offer a corrective partial close.
+```
+
+Since eToro has no amount-slippage, `actual_amount` should equal `expected_amount` exactly. Any over-fill is genuinely an agent-side bug — most often: an inflated equity reference, a round-up bug, or a compounded-base error. **Do not** silently accept an over-allocation.
+
+When detected, present it clearly and offer the fix:
+
+```
+⚠ BTC filled at $305 (30.5% of equity). Stated cap was 30% ($300).
+This is an over-allocation by $5. Trim by partial-closing $5 of BTC to bring it to exactly 30%? [Y/n]
+```
+
+Compute the corrective close as `over = actual_amount − expected_amount`, then partial-close `over` worth of the position (translate to `UnitsToDeduct` per `single-trade-walkthrough.md` Step 6). Apply the at-most-once discipline to the corrective close too — don't retry on ambiguous outcomes; re-verify via `/pnl` instead.
+
+Verify allocation against `EQUITY_ANCHOR`, not against current/post-execution equity. Equity may have moved with market action on other positions during the build — a position's percentage of *current* equity can drift even when its dollar size is exactly correct. The anchor is the user's intent; current equity is the moving market.
+
 ### Communication template
 
 In approval mode, after executing (regular-account / dollar version):
@@ -261,12 +316,15 @@ If anything failed, surface the failures explicitly with the error reason and su
 ## 6. Sanity checks
 
 - [ ] Plan input validated: dollar form OR percentage form, not mixed.
-- [ ] Sufficiency check passed: `Σ dollars ≤ available cash` (and for percentages, also `Σ ≤ 100%`).
+- [ ] **`EQUITY_ANCHOR` and `CASH_ANCHOR` frozen at workflow start** (§2) and used for ALL sizing, sufficiency, and verification — never recomputed mid-flow.
+- [ ] Sufficiency check passed: `Σ amount_usd ≤ CASH_ANCHOR` (and for percentages, also `Σ ≤ 100%`).
 - [ ] ≤ 20 instruments recommended (warn the user if more).
 - [ ] All `instrumentID`s resolved up front; partial-resolution plans rejected entirely.
+- [ ] **Sizing — stated allocations are CEILINGS**: `amount_usd = floor(pct × EQUITY_ANCHOR × 100) / 100`; never round up; never round to "nice numbers"; cumulative `spent_so_far + next_amount ≤ total_planned` checked before each send.
 - [ ] Trade-execution requests spaced ≥3s; 429 handled with 15s → 30s → 60s backoff; per-trade limit of 3 retries.
 - [ ] **At-most-once delivery enforced**: only 429 triggers a same-payload retry. 4xx (except 429), 5xx, and ambiguous outcomes (timeout / connection drop / no response) are never retried — they're reconciled at verification time via `/pnl`. This is the duplicate-position prevention rule.
 - [ ] **On 401: stop the entire batch immediately, report which trades succeeded before the failure, ask for a new credential.** Never report the batch as "complete" when it isn't.
 - [ ] Other per-trade failures (400, 5xx) are logged and reported but don't abort the batch and are never retried.
 - [ ] Post-execution: 60s wait, then `/pnl` re-read; results categorized as filled / pending / failed / ambiguous-but-missing against the plan; ambiguous trades resolved by checking `positions[]`/`ordersForOpen[]`, never by re-firing.
-- [ ] User-facing report uses **the same unit the user gave you** (dollars on regular accounts; percentages in agent-portfolio context); pending-market-open distinction explicitly surfaced.
+- [ ] **Over-allocation check** (§5): for each filled position, `actual_amount ≤ floor(stated_pct × EQUITY_ANCHOR × 100) / 100`. Any over-fill is flagged and a corrective partial close is offered. Allocation is verified against `EQUITY_ANCHOR`, NOT current/post-execution equity.
+- [ ] User-facing report uses **the same unit the user gave you** (dollars on regular accounts; percentages in agent-portfolio context); pending-market-open distinction explicitly surfaced; percentages reported are computed against `EQUITY_ANCHOR`, not current equity.
