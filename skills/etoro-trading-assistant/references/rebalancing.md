@@ -185,6 +185,24 @@ amount_usd = floor(target_pct × EQUITY_ANCHOR × 100) / 100   // for percentage
 - **If position doesn't currently exist**: standard bulk open with `Amount = amount_usd`.
 - **If position exists and target is higher**: open *another* order with `Amount = floor(diff_dollars × 100) / 100`. eToro doesn't have an "increase position" call — place a second order alongside the existing one. (Both will appear in `positions[]` and add together against the target.) The combined `position.amount` total must still satisfy the ceiling: `Σ position.amount on this instrument ≤ floor(target_pct × EQUITY_ANCHOR × 100) / 100`.
 
+#### Open buffer if planned post-rebalance cash < 1% of equity
+
+After computing per-position open amounts, apply the open-buffer check from `execution-invariants.md` §2:
+
+```
+total_opens               = Σ amount_usd[i]   // Phase 2 opens
+post_rebalance_cash_pct   = (CASH_ANCHOR + freed_from_closes − total_opens) / EQUITY_ANCHOR
+   // For the insufficient-cash variant, freed_from_closes = close_target ≈ shortfall + close_buffer,
+   // so post_rebalance_cash_pct ≈ close_buffer / EQUITY_ANCHOR ≈ 1% of shortfall / EQUITY — usually tiny.
+
+if post_rebalance_cash_pct < 0.01:
+  for each i: amount_usd[i] = floor(amount_usd[i] × 0.99 × 100) / 100
+```
+
+**Interaction with `close_buffer` in the insufficient-cash variant.** Both buffers stay — they protect against different leakage sources (close-side fees → `close_buffer`; open-side fees → open buffer). On a typical insufficient-cash rebalance, both will be applied: the close phase frees `shortfall + close_buffer`, then Phase 2 opens are each shrunk by 1% if planned post-rebalance cash is < 1% of equity (which it usually is for an insufficient-cash variant by design).
+
+**Disclosure**: percentage-form rebalance plans apply the buffer silently (the user-facing percentages don't change). Dollar-form rebalance plans should mention the per-position under-fill in the §4 plan confirmation, same as the bulk-trading dollar-form rule.
+
 ---
 
 ## 4. Confirm with the user (approval mode = "ask")
@@ -280,6 +298,7 @@ Cross-cutting invariants (covered by `execution-invariants.md`):
 
 - [ ] **Anchor freeze** — `EQUITY_ANCHOR` / `CASH_ANCHOR` frozen at workflow start (§1) and used for sizing in BOTH phases; the 60s wait re-reads cash for execution-readiness only.
 - [ ] **Ceilings on opens** — `amount_usd = floor(target_pct × EQUITY_ANCHOR × 100) / 100`; over-fills surfaced and corrected.
+- [ ] **Open buffer** — if `(CASH_ANCHOR + freed_from_closes − Σ opens) / EQUITY_ANCHOR < 0.01`, each open re-floored to `× 0.99` so per-trade fees don't push displayed cash negative. On the insufficient-cash variant this is almost always triggered (and stacks with the existing close_buffer; both are kept).
 - [ ] **At-most-once on every POST in BOTH phases** — only 429 retried; 4xx/5xx/ambiguous reconciled via `/pnl`, never re-fired. Critical on closes: a duplicated partial close can over-liquidate.
 - [ ] **On 401** — entire rebalance stops immediately; user is told which closes / opens succeeded; no "done" summary on a partial run.
 

@@ -146,7 +146,16 @@ Apply `execution-invariants.md` §2 (the canonical ceilings rule) to every trade
    spent_so_far + amount_usd[i] ≤ CASH_ANCHOR
    ```
    If violated, abort the batch and recompute — don't silently shrink-and-fire (the user agreed to a specific plan).
-3. **Send the floored amount exactly.** Since eToro has no amount-slippage, the floored amount IS the filled value. Mirror image for dollar-form plans — *"$295"* means send `$295`, not `$300` for cleanliness.
+3. **Open buffer if planned cash < 1% of equity** (per `execution-invariants.md` §2 "Open buffer"). After the floor in step 1, before any POST:
+   ```
+   total_planned    = Σ amount_usd[i]
+   planned_cash_pct = (CASH_ANCHOR − total_planned) / EQUITY_ANCHOR
+
+   if planned_cash_pct < 0.01:
+     for each i: amount_usd[i] = floor(amount_usd[i] × 0.99 × 100) / 100
+   ```
+   For percentage-form bulk plans, this re-floor is silent — the user-facing percentages don't change (the under-fill is invisible at percentage resolution). For dollar-form plans, the per-position dollar amounts change visibly; mention the under-fill in the §3 confirmation message before sending.
+4. **Send the floored amount exactly.** Since eToro has no amount-slippage, the floored amount IS the filled value. Mirror image for dollar-form plans — *"$295"* means send `$295`, not `$300` for cleanliness.
 
 ### Pacing
 
@@ -282,6 +291,7 @@ Cross-cutting invariants (covered by `execution-invariants.md`):
 
 - [ ] **Anchor freeze** — `EQUITY_ANCHOR` / `CASH_ANCHOR` frozen at workflow start and used for ALL sizing, sufficiency, and verification.
 - [ ] **Ceilings** — `amount_usd = floor(pct × EQUITY_ANCHOR × 100) / 100`; cumulative `spent_so_far + next ≤ total_planned ≤ CASH_ANCHOR` checked before each send; post-fill verification against `EQUITY_ANCHOR`, not current equity; over-fills surfaced and corrected via partial close.
+- [ ] **Open buffer** — if planned cash < 1% of `EQUITY_ANCHOR`, each `amount_usd[i]` re-floored to `× 0.99` to absorb per-trade fees; disclosed for dollar-form plans, silent for percentage-form plans.
 - [ ] **At-most-once** — only 429 retried (15s → 30s → 60s, max 3); 4xx (non-429), 5xx, and ambiguous outcomes reconciled at verification time via `/pnl`, never re-fired.
 - [ ] **On 401** — entire batch stops immediately; user is told which trades succeeded and which never executed; no "complete" summary on a partial run.
 

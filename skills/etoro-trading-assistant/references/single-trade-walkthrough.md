@@ -70,7 +70,7 @@ GET /trading/info/{env}/pnl
 
 Compute Available Cash via the formula in `account-snapshot.md` §1.
 
-- If `requested_amount ≤ available_cash` → proceed.
+- If `requested_amount ≤ available_cash` → proceed (with the open-buffer check below).
 - If `requested_amount > available_cash` → **stop, present the gap, and ask the user explicitly** what to do. Don't auto-close other positions to fund the trade — closes are destructive actions and require explicit consent (per `etoro-trading-assistant/SKILL.md` "Confirm before destructive actions"). Offer two options:
 
   ```
@@ -89,6 +89,20 @@ Compute Available Cash via the formula in `account-snapshot.md` §1.
 
 For a **close**, no cash pre-flight is needed — the position already exists.
 
+#### Open buffer — shrink the trade by 1% if cash would drop below 1% of equity
+
+Per `execution-invariants.md` §2 "Open buffer", before sending the open:
+
+```
+post_trade_cash_pct = (CASH_ANCHOR − requested_amount) / EQUITY_ANCHOR
+
+if post_trade_cash_pct < 0.01:
+  requested_amount = floor(requested_amount × 0.99 × 100) / 100
+  # User-facing disclosure required at Step 4 (see below)
+```
+
+**Worked example.** *"Buy $300 of BTC"* with `EQUITY_ANCHOR = $10,000` and `CASH_ANCHOR = $300` (almost no cash to spare). `post_trade_cash_pct = 0%` < 1% → buffer applies. Send `Amount: $297.00` and disclose the under-fill in the Step 4 confirmation. (For `EQUITY_ANCHOR = $10,000`, `CASH_ANCHOR = $5,000`, requesting `$300` of BTC: `post_trade_cash_pct = 47%` > 1% → no buffer; send `$300` exactly.)
+
 ### Step 4 — Confirm with the user
 
 Show the planned trade in plain language and set the user's expectation that verification takes ~1 minute (per Step 6's read-back-timing rule), then wait for confirmation:
@@ -100,6 +114,19 @@ Leverage: 1× (no leverage).
 I'll place the order and confirm the result in about a minute.
 Proceed?
 ```
+
+**If the open buffer (Step 3) was applied to a dollar-form intent**, surface it explicitly in the confirmation so the user isn't surprised by a smaller-than-stated amount:
+
+```
+Buying $297 of BTC at market (1% under your stated $300 — keeping a small
+cash cushion so eToro's per-trade fees don't push your cash below zero).
+Leverage: 1× (no leverage).
+
+I'll place the order and confirm the result in about a minute.
+Proceed?
+```
+
+For percentage-form intents on a single trade (rare, but possible — e.g. *"buy 5% of equity in BTC"*), the under-fill is invisible at percentage resolution; no disclosure needed.
 
 Format the amount as the user originally specified — dollars or units — don't translate behind their back. For closes, include the position's **current value** (what they're about to liquidate, in dollars) so they have the right context for the decision:
 
@@ -246,6 +273,7 @@ Include side effects when meaningful (e.g. *"Available cash dropped from $8,000 
 Cross-cutting invariants (covered by `execution-invariants.md`):
 
 - [ ] **For percentage intents** — anchor freeze (§1) applied; `amount_usd = floor(pct × EQUITY_ANCHOR × 100) / 100` (§2 ceilings); over-fill at verification triggers a corrective partial close.
+- [ ] **Open buffer** (§2) — if `(CASH_ANCHOR − requested_amount) / EQUITY_ANCHOR < 0.01`, the trade is shrunk by 1% (`floor(amount × 0.99 × 100) / 100`); for a dollar-form intent, the under-fill is disclosed in the Step 4 confirmation.
 - [ ] **At-most-once** (§3) — only 429 retried; 4xx/5xx and ambiguous outcomes reconciled by reading `positions[]`, never by re-firing.
 - [ ] **On 401** (§4) — workflow stops; user is told no trade was placed; for mid-session 401, partial state is reported explicitly.
 

@@ -76,6 +76,41 @@ Compute `over = actual_amount − expected_amount` and partial-close `over` wort
 
 When the close is happening to **free cash for an upcoming open** (the insufficient-cash variant in `rebalancing.md` §A), the closes round **UP** instead of down — close at least `shortfall + buffer`, never less. Without that, partial-close unit rounding or post-close fees can leave you a few dollars short of the target and force a corrective second close-then-wait round. Full mechanics: `rebalancing.md` §A.
 
+### Open buffer — shrink each open by 1% when planned cash would drop below 1% of equity
+
+The base ceiling rule above verifies `position.amount` only — it cannot detect cash leaking out via eToro's per-trade fees and spreads, which come out of `credit` (not out of `position.amount`). On an aggressive build that deploys close to 100% of equity, those fees push the displayed cash buffer below the user-stated cash buffer, and the displayed position percentages slightly above their stated caps.
+
+The open buffer is the **mirror image of the close buffer** (`rebalancing.md` §A): closes round UP and over-free cash to absorb close-side fees; opens round DOWN and under-deploy cash to absorb open-side fees.
+
+**Decision logic** (apply once per workflow, after the per-position floor and cumulative check, before the first POST):
+
+```
+total_planned   = Σ amount_usd[i]                                  // pre-buffer, after the floor()
+post_workflow_cash = CASH_ANCHOR + freed_from_closes − total_planned   // for rebalance; for an initial build, freed_from_closes = 0
+planned_cash_pct   = post_workflow_cash / EQUITY_ANCHOR
+
+if planned_cash_pct < 0.01:
+  # Plan would leave less than 1% of equity in cash → not enough headroom for fees.
+  # Shrink each open by 1% (mirror image of close_buffer):
+  for each i:
+    amount_usd[i] = floor(amount_usd[i] × 0.99 × 100) / 100
+    # Equivalent: floor(pct_i × EQUITY_ANCHOR × 0.99 × 100) / 100
+else:
+  # Plan already leaves ≥ 1% cash → that buffer absorbs fees naturally; no shrink.
+  (no change)
+```
+
+**Worked example.** User says *"buy $300 of BTC"* on a single-trade flow with `EQUITY_ANCHOR = $10,000` and `CASH_ANCHOR = $300` (almost no cash to spare). `planned_cash_pct = ($300 − $300) / $10,000 = 0%`, which is `< 1%` → buffer applies. Send `Amount: floor($300 × 0.99 × 100) / 100 = $297.00`. The remaining $3 sits in cash to absorb the open's fee/spread; the displayed cash post-trade lands at ~$0–3 instead of going slightly negative.
+
+**When NOT to apply.** If the user's plan already leaves ≥ 1% cash (e.g. an "open 95% of equity" build with 5% reserved as cash), the existing 5% cushion absorbs fees naturally and no per-position shrink is needed. The displayed cash will land slightly under 5% (typically 4.9-something%), but it will never cross zero.
+
+**Disclosure to the user:**
+
+- **Dollar-form single-trade intent** ("buy $300 of BTC") — disclose the under-fill in the Step 4 confirmation: *"Buying $297 of BTC (1% under your stated $300, to keep a small cash cushion for eToro's per-trade fees). Proceed?"* The user named a precise number; they should know it changed.
+- **Percentage-form bulk or rebalance plan** ("25% AAPL, 15% MSFT, …") — apply silently. The under-fill is invisible at percentage resolution (the user said "25%"; the agent confirms "25%"; internally the API call sends `floor(25% × E × 0.99)` instead of `floor(25% × E)` — a difference the user cannot perceive). Stating the buffer would be internal-narration noise per `etoro-trading-assistant/SKILL.md` "Talk in bottom lines, not mechanics".
+
+**Why 1% specifically.** Mirrors the `close_buffer` percentage. Empirically large enough to absorb typical eToro per-trade fees and spreads on a per-position basis, small enough that the user's intent is preserved within reason. Not adaptive to the actual fee level (eToro doesn't expose a per-trade fee preview); a fixed 1% is the simplest defensible choice.
+
 ---
 
 ## 3. At-most-once delivery on every trade-execution POST
@@ -169,5 +204,6 @@ Every workflow reference includes its own sanity-checks at the bottom that re-st
 
 - [ ] **Anchor freeze**: `/pnl` read at workflow start; `EQUITY_ANCHOR` and `CASH_ANCHOR` frozen for the duration; never recomputed mid-flow.
 - [ ] **Ceilings**: `amount_usd = floor(pct × EQUITY_ANCHOR × 100) / 100`; cumulative `spent_so_far + next ≤ Σ planned ≤ CASH_ANCHOR` checked before each send; post-fill verification against `EQUITY_ANCHOR` (not current equity); over-fills surfaced and corrected via partial close.
+- [ ] **Open buffer**: if planned post-workflow cash < 1% of `EQUITY_ANCHOR`, each open is shrunk by an additional 1% (`floor(amount_usd × 0.99 × 100) / 100`) so eToro fees don't push displayed cash negative. Disclosed for dollar-form single trades; silent for percentage-form bulk/rebalance plans.
 - [ ] **At-most-once**: only 429 triggers a same-payload retry; 4xx (non-429), 5xx, and ambiguous outcomes are logged and reconciled by reading `positions[]`/`ordersForOpen[]` at verification time, never by re-firing.
 - [ ] **401**: workflow stops immediately; the user is told which trades succeeded and which never executed; no "completed" summary on a partial run.

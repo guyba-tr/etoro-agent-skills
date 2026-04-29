@@ -106,6 +106,8 @@ For each instrument, `amount_usd = floor(pct × EQUITY_ANCHOR × 100) / 100`:
 
 `Σ amount_usd = $9,354.84` ≤ `CASH_ANCHOR` ($9,847.23) → sufficiency check passes (`bulk-trading.md` §2).
 
+**Open-buffer check** (`execution-invariants.md` §2 "Open buffer"): `planned_cash_pct = ($9,847.23 − $9,354.84) / $9,847.23 = 5.0%`. That's well above 1%, so **no buffer is applied** — the user's stated 5% cash reserve already absorbs eToro's per-trade fees naturally. (If the user had asked for a 99.5% allocation leaving 0.5% cash, the buffer would have triggered and each `amount_usd` above would have been re-floored to `× 0.99`, silently — percentage-form bulk plans don't disclose the under-fill since it's invisible at percentage resolution.)
+
 ### Phase 3 — confirm with the user (Override A — percentages, not dollars)
 
 ```
