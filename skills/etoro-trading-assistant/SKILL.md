@@ -26,6 +26,12 @@ For capabilities not in this table — watchlists, feeds/comments, social/popula
 
 ## How to interact with the user
 
+- **Talk in bottom lines, not mechanics.** The user expects two things from the agent: confirmation before action, and a verified outcome after. They do **NOT** want to see endpoint paths (`POST /trading/execution/...`), header or field names (`InstrumentID`, `x-user-key`, `at-most-once`), pacing or rate-limit reasoning (*"I need to pace these ≥ 3s apart"*), internal loop state (*"the loop broke early; let me close the remaining 9"*), workflow-recovery debugging (*"Found it — the close endpoint doesn't take `/real/` in the path. Let me try again."*), or invariants stated out loud (*"Agent-portfolio = always real environment, at-most-once on each POST"*). Speak to the user only at decision points:
+  - **Before action** — intent confirmation, including the expected wait time when the 60s `/pnl` cache will gate verification.
+  - **After action** — single verified bottom-line outcome.
+  - **When you genuinely need user input** — destructive choice, ambiguity (*"you have two AAPL positions, which one?"*), credential refresh, an unrecoverable error.
+  
+  Everything else — endpoint-shape discovery, retry-on-429, ambiguous-outcome reconciliation via `/pnl`, mid-batch failure recovery, fixing your own bugs in the request payload — happens **silently**. If the next thing you're about to send to the user starts with *"Let me"*, *"Found it"*, *"I need to"*, *"Now let me"*, *"The loop"*, or names an HTTP verb / endpoint path / header / JSON field, it is almost certainly internal narration that should not be sent. See `references/examples.md` Example 4 for a side-by-side bad/good demonstration.
 - **Confirm before destructive actions.** Any open / close / cancel / modify requires explicit user confirmation, unless the user has already opted into recurring rebalancing or conditional rules (see `etoro-agent-portfolios`).
 - **Determine environment from the key — don't ask the user.** A user-key is bound to one environment (real or demo) at creation. Probe `GET /trading/info/real/pnl` once at session start: **200 → real key**, **403 InsufficientPermissions → demo key**. Cache the result and use the matching `/real/` or `/demo/` endpoints for the rest of the session. Agent-portfolio user-tokens are always real (skip the probe). Full procedure: `references/api-conventions.md` "Determining the key's environment". (`/trading/info/trade/history` requires a real-environment credential specifically.)
 - **Check current equity / cash before any trade workflow.** Call `/trading/info/{env}/pnl` and compute Available Cash and Equity per `references/account-snapshot.md` before opens, closes, builds, or rebalances. Don't reuse stale values from earlier in the conversation — positions move and the numbers change. The full rule (anchor freeze) lives in `references/execution-invariants.md` §1. It applies to both main accounts and agent-portfolios; it's *especially* critical for agent-portfolios (see Override B in `etoro-agent-portfolios`).
@@ -61,7 +67,7 @@ For capabilities not in this table — watchlists, feeds/comments, social/popula
 - `references/id-resolution.md` — symbol → `instrumentID` resolution; conversation-scoped caching; metadata enrichment with image-variant selection.
 - `references/account-snapshot.md` — official aggregation formulas (Available Cash, Total Invested, Profit/Loss, Equity) + per-field correctness rules (currency, leverage, fees blended with dividends, mirror-array dedup).
 - `references/sso-and-session.md` — identity resolution from `/api/v1/me`, the `cidList` vs `gcid` data-leak trap, dead-session detection, and the "Reconnect to eToro" flow.
-- `references/examples.md` — three worked end-to-end conversation walkthroughs (single-trade open on a main account, bulk build on an agent-portfolio, 401 mid-bulk-build) showing tone, pacing, and the invariants applied in practice.
+- `references/examples.md` — four worked end-to-end conversation walkthroughs (single-trade open on a main account, bulk build on an agent-portfolio, 401 mid-bulk-build, and a side-by-side bad/good demonstration of "talk in bottom lines, not mechanics") showing tone, pacing, and the invariants applied in practice.
 
 ## External resources
 

@@ -1,6 +1,6 @@
 # Worked Examples
 
-Reference for the `etoro-trading-assistant` skill. Three end-to-end conversation walkthroughs that show the rules from `execution-invariants.md` and the workflow references applied in practice — the tone, the pacing of confirmations, the order of steps, and what the user actually sees.
+Reference for the `etoro-trading-assistant` skill. Four end-to-end conversation walkthroughs that show the rules from `execution-invariants.md` and the workflow references applied in practice — the tone, the pacing of confirmations, the order of steps, and what the user actually sees.
 
 These are illustrative, not normative. Where they conflict with a workflow reference, the reference wins.
 
@@ -211,3 +211,87 @@ What this would NOT look like:
 - ❌ *"Some trades may have failed, please check your account"* (vague; the agent knows exactly which ones).
 - ❌ *"Retrying…"* (no point — the credential is dead, retrying just generates more 401s).
 - ❌ Auto-resuming after the user provides a new token without explicit consent (the market may have moved; the user may want to revise).
+
+---
+
+## Example 4 — Close all positions (talking in bottom lines, not mechanics)
+
+**Scenario:** the user asks the agent to close all 10 open positions on their agent-portfolio. The agent's recovery work mid-execution — endpoint-shape discovery, payload fixes, partial-batch recovery — should be **completely invisible** to the user. The user gets one confirmation, then silence, then the verified result.
+
+This example exists because the failure mode it prevents is the most common UX bug in trading agents: the agent narrating its own internal mechanics, retries, and bug-fixes to the user as if the user were a developer debugging alongside it.
+
+```
+USER: Close all my open positions.
+```
+
+### ❌ Bad version — what the agent should NOT send
+
+These are the kinds of messages that leak internal mechanics to the user. Every one of them is technically true but operationally noise:
+
+```
+ASSISTANT: Now let me close all 10 positions. Agent-portfolio = always
+real environment, at-most-once on each POST, and I need to pace them
+(rate limits: ≥3s between requests).
+
+ASSISTANT: Found it. The real close endpoint doesn't use /real/ in the
+path. It's just /trading/execution/market-close-orders/positions/{positionId}.
+
+ASSISTANT: The close endpoint requires InstrumentId in the body. Let me
+fix that and run all 10.
+
+ASSISTANT: First one (BTC) closed successfully. The loop broke early.
+Let me close the remaining 9.
+
+ASSISTANT: All 10 positions closed successfully. Let me verify.
+
+ASSISTANT: All clear. 10/10 positions closed, all filled. Portfolio is
+now 100% cash.
+```
+
+Why each line is wrong:
+
+- **Line 1** narrates invariants (real environment, at-most-once, pacing). The user does not need to know about HTTP rate limits to read a status update.
+- **Line 2** is the agent debugging an endpoint path. The user neither knows nor cares what `/real/` is.
+- **Line 3** is the agent fixing its own request payload bug. Internal.
+- **Line 4** exposes loop control flow — *"the loop broke early"* tells the user something went wrong without telling them what to do about it. If nothing was actually lost, don't mention it.
+- **Line 5** is a status ping that adds nothing for the user.
+- **Line 6** is the **only** line the user actually needed.
+
+### ✅ Good version — what the agent SHOULD send
+
+```
+ASSISTANT: I'll close all 10 of your open positions. Estimated time
+~90 seconds (~30s of paced execution + 60s wait for the PnL cache to
+refresh before verification). Proceed?
+
+USER: yes
+
+[~90 seconds of silence — agent executes, recovers from any payload
+ or path issues silently, retries 429s silently, waits 60s, verifies]
+
+ASSISTANT: Done — all 10 positions closed. Your portfolio is now 100%
+cash.
+```
+
+Two messages, total. One sets expectations and asks for consent. One delivers the verified bottom line.
+
+### What changed between the two versions
+
+The agent does the **same internal work** in both cases:
+- Resolves the close endpoint shape and required fields
+- Paces ≥ 3s between POSTs (per `bulk-trading.md` §4)
+- Recovers silently if a request returns 4xx with a fixable payload error (within at-most-once: a payload-shape fix is a *different* request, not a retry of the same one — so it's allowed)
+- Waits 60s for the cache (per `account-snapshot.md` §1 "60-second response cache")
+- Reads `/pnl` and confirms 0 open positions remaining
+
+What changes is **what the agent says out loud about that work**. In the good version: nothing. In the bad version: all of it.
+
+### When silence is wrong — escape hatches
+
+The "stay silent" rule has three legitimate exceptions, all called out in `etoro-trading-assistant/SKILL.md` "Talk in bottom lines, not mechanics":
+
+1. **Destructive choice that requires user input.** *"You have two AAPL positions, opened at different times. Close both, or just one?"* — wait for the user. Don't pick.
+2. **Credential failure mid-batch (401).** Stop immediately and report which closes succeeded and which never executed (per `execution-invariants.md` §4 and Example 3 above). Never claim a partial close batch is "done".
+3. **Partial outcome the user needs to know about.** If 9 of 10 closed and NVDA failed for a non-recoverable reason, the bottom line includes the failure: *"Closed 9 of 10. NVDA failed (insufficient permissions on this instrument). Want me to skip it or escalate?"* — *not* *"Let me retry NVDA"* (which is internal).
+
+In all other cases — payload fixes, endpoint-path discovery, 429 backoffs, ambiguous-outcome reconciliation — the user sees nothing until the verified bottom line.
