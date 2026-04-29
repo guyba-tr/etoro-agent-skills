@@ -77,7 +77,8 @@ so we don't land short and have to rebalance again — total close target $303).
 I'll partially close MSFT (currently worth $1,200, reducing to ~$897) to fund this.
 
 Net effect: AAPL +$1,500, MSFT −$303, available cash −$1,197.
-Estimated time: ~95 seconds.
+Estimated time: ~2½ minutes (the PnL endpoint caches for 60s, so we wait once
+between the close and the open and once more before the final verification).
 
 Proceed?
 ```
@@ -90,7 +91,7 @@ To open AAPL at 5%, I need to free 3% of cash (plus a small safety buffer of
 I'll partially close MSFT (currently 12% → ~8.97%) to fund this.
 
 Net effect: AAPL +5%, MSFT −3.03%, available cash ~−1.97%.
-Estimated time: ~95 seconds.
+Estimated time: ~2½ minutes (two 60s waits for the PnL cache to refresh).
 
 Proceed?
 ```
@@ -202,8 +203,9 @@ Opening / increasing:
 - TSLA:  $0    → $1,500    (new position)
 - NVDA: $1,000 → $2,000    (additional order)
 
-Estimated time: ~95 seconds
-  (~25s of close pacing + 60s PnL-cache wait + ~10s of open pacing).
+Estimated time: ~155 seconds
+  (~25s of close pacing + 60s PnL-cache wait + ~10s of open pacing
+   + 60s PnL-cache wait before final verification).
 
 Proceed?
 ```

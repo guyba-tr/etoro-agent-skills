@@ -24,10 +24,12 @@ USER: I want to buy $1,000 of AAPL.
 
 3. *Pre-flight cash* (Step 3). Read `/pnl` for the active environment (per `api-conventions.md` "Demo vs. real environments" — the env was already determined the first time the agent hit `/pnl` this session). Compute Available Cash via `account-snapshot.md` §1 → $5,237. $1,000 ≤ $5,237 → proceed.
 
-4. *Confirm with the user* (Step 4):
+4. *Confirm with the user* (Step 4) — flag the ~1-minute verification wait up front:
 
 ```
-ASSISTANT: Ready to place: buying $1,000 of AAPL at market, leverage 1× (no leverage). Proceed?
+ASSISTANT: Ready to place: buying $1,000 of AAPL at market, leverage 1× (no leverage).
+I'll place the order and confirm the result in about a minute.
+Proceed?
 
 USER: yes
 ```
@@ -39,20 +41,26 @@ USER: yes
    - Headers: `x-api-key`, `x-user-key`, `x-request-id` (fresh UUID v4).
    - Response: `200 { "orderId": "..." }` → at-most-once: done, move on (`execution-invariants.md` §3).
 
-6. *Verify* (Step 6). Re-read `/pnl`. New AAPL entry in `clientPortfolio.positions[]` at $1,000 / 5.57 units / `openRate` $179.50. Filled.
+6. *Wait then verify* (Step 6).
 
-7. *Report back* (Step 7) — in the user's framing (dollars + units), with cash-impact side effect:
+   - `sleep(60_000)` — the `/pnl` endpoint is cached for 60 s and the cache covers `positions[]` / `ordersForOpen[]`; reading earlier returns the pre-trade snapshot (see `account-snapshot.md` §1 "60-second response cache").
+   - Re-read `/pnl`. New AAPL entry in `clientPortfolio.positions[]` at $1,000 / 5.57 units / `openRate` $179.50. Filled.
+
+7. *Report back* (Step 7) — single bottom-line message after the wait, in the user's framing (dollars + units), with cash-impact side effect:
 
 ```
 ASSISTANT: Bought $1,000 of AAPL at $179.50 (5.57 units). Available cash dropped from $5,237 to $4,237.
 ```
+
+The user sees one short message during execution (Step 4 confirmation, with the "about a minute" expectation) and one bottom-line message after verification (Step 7). No interim "Order placed; verifying…" — just stay quiet and deliver the verified result.
 
 ### What you do NOT see in this example
 
 - **No "real or demo?" question.** The user-key is bound to one environment at creation; the agent already knows. (`api-conventions.md` "Demo vs. real environments".)
 - **No anchor freeze ceremony.** For a single dollar-form trade with explicit cash pre-flight, the workflow doesn't need a frozen `EQUITY_ANCHOR` (the dollar amount IS the user's intent, not a derived one). If the user had said *"buy 5% of equity in AAPL"*, the agent would freeze `EQUITY_ANCHOR` at the start of Step 3, compute `amount_usd = floor(0.05 × EQUITY_ANCHOR × 100) / 100`, and verify the fill against that anchor (`execution-invariants.md` §§1–2).
 - **No second-guessing on a 200 response.** The agent does not re-fire the same payload "to be safe" — that's the at-most-once rule.
-- **No "your trade was placed successfully" hand-wave.** The verification step (`positions[]` lookup) is what justifies the "Bought $1,000 of AAPL at $179.50" report. Without that, the agent would have to say "Order accepted; verifying…" and read `/pnl` before claiming the fill.
+- **No early `/pnl` read.** Verifying before the cache refreshes would show the *pre-trade* snapshot (no AAPL in `positions[]`) and produce a false "trade didn't land" report. The 60 s wait is what makes the verified report trustworthy.
+- **No two-message pattern.** The agent does not say *"Order placed; verifying…"* and then follow up. The user gets the Step 4 expectation-set ("about a minute") and the Step 7 verified result — nothing in between.
 
 ---
 
@@ -111,7 +119,7 @@ ASSISTANT: I'll open 7 positions on your agent-portfolio:
   - SOL:     5%
   - (cash):  5%
 
-Total allocated: 95%. Estimated time ~25 seconds (3s pacing per trade plus verification).
+Total allocated: 95%. Estimated time ~85 seconds (~25 s of 3s-paced execution + 60 s wait for the PnL cache to refresh before verification).
 
 Proceed?
 

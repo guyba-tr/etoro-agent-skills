@@ -91,11 +91,13 @@ For a **close**, no cash pre-flight is needed — the position already exists.
 
 ### Step 4 — Confirm with the user
 
-Show the planned trade in plain language and wait for confirmation:
+Show the planned trade in plain language and set the user's expectation that verification takes ~1 minute (per Step 6's read-back-timing rule), then wait for confirmation:
 
 ```
 Buying $1,000 of AAPL at market.
 Leverage: 1× (no leverage).
+
+I'll place the order and confirm the result in about a minute.
 Proceed?
 ```
 
@@ -103,6 +105,7 @@ Format the amount as the user originally specified — dollars or units — don'
 
 ```
 Closing your MSFT position (currently worth $1,328).
+I'll confirm the result in about a minute.
 Proceed?
 ```
 
@@ -190,7 +193,7 @@ Send `Amount: amount_usd` exactly. Mirror image for dollar-form intents — *"bu
 
 ### Step 6 — Verify the order landed
 
-A successful POST means the order was **accepted**, not necessarily filled. Three landing states are possible:
+A successful POST means the order was **accepted**, not necessarily filled. To verify what actually happened, read `/pnl` and check three landing states:
 
 | State | Where it lives in `clientPortfolio` | Tell the user |
 |---|---|---|
@@ -200,11 +203,23 @@ A successful POST means the order was **accepted**, not necessarily filled. Thre
 
 If the failure was a **401** (the credential is no longer valid — typically the user revoked their `x-user-key`), don't categorize it as a generic "failed trade" — surface it specifically per `sso-and-session.md` §3 and stop. The single-trade context makes hallucination less catastrophic than in a bulk flow, but the user still needs to know clearly that **no trade was placed** and that their key needs replacing.
 
-#### Read-back timing
+#### Read-back timing — wait 60 seconds before reading `/pnl`
 
-- For a **single open**: read `/pnl` immediately after the POST returns. `positions[]` typically updates promptly for fills; the 60-second cache mostly affects derived values like account-level P&L. If the position is in `positions[]`, you're done.
-- For a **single close**: confirm the position is **gone** from `positions[]` (full close) or has **smaller `units`** (partial close). If neither happened after a re-read, treat as failed.
-- **If you'll execute another trade right after that depends on freed cash**: wait the full 60 seconds before reading `/pnl` again — Available Cash relies on `credit` and `ordersForOpen` aggregation, which are subject to the cache. (This pattern usually means you're about to enter the rebalance flow — load `rebalancing.md`.)
+The `/pnl` endpoint is **cached for 60 seconds (rolling)** and the cache covers the **entire `clientPortfolio` response** — `positions[]`, `ordersForOpen[]`, `credit`, `unrealizedPnL`, all of it. See `account-snapshot.md` §1 "60-second response cache" for the full mechanic. The practical consequence:
+
+> **Reading `/pnl` immediately after a successful POST returns the *pre-trade* snapshot.** The just-opened position is NOT yet in `positions[]`. If the agent reads early and sees no AAPL, it will *falsely* report the trade as failed — when in fact the trade landed.
+
+Therefore:
+
+```
+sleep(60_000)   // after the POST returns 2xx
+const pnl = await fetchPnl()
+// now categorize against the table above
+```
+
+This applies uniformly to opens, closes, partial closes, and limit orders — any trade whose verification depends on reading the post-trade `clientPortfolio` snapshot. The 60 s wait is a **correctness** requirement, not a UX preference.
+
+**The user-facing implication:** tell the user up front, in Step 4 (confirmation), that you'll come back with the verified result in about a minute. Don't send an interim "Order placed; verifying…" message — just stay quiet and send the bottom-line result once verification completes (see Step 7).
 
 ### Step 7 — Report back
 
@@ -240,10 +255,10 @@ Single-trade-specific:
 - [ ] Symbol resolved to a verified `instrumentId`; exact-match check on `internalSymbolFull` performed.
 - [ ] For opens: Available Cash computed via `account-snapshot.md` §1 and verified ≥ requested amount.
 - [ ] For closes: `positionId` looked up from `positions[]`, not assumed; if multiple positions exist on the same instrument, the user picked which one.
-- [ ] User confirmed the trade in plain language before POST (unless auto-execute is opted in).
+- [ ] User confirmed the trade in plain language before POST, **with the ~1-minute verification wait surfaced up front** so the silence isn't a surprise (Step 4); confirmation skipped only if auto-execute is opted in.
 - [ ] `Leverage: 1` sent explicitly when not specified.
-- [ ] Post-execution: `/pnl` re-read and trade categorized as filled / pending / failed; pending-market-open distinction surfaced.
-- [ ] Outcome reported in the user's original framing (their dollars or their units), with meaningful side effects (e.g. cash impact) noted.
+- [ ] **Post-execution: 60s wait, then `/pnl` re-read and trade categorized as filled / pending / failed.** The wait is mandated by the 60s response cache that covers `positions[]` and `ordersForOpen[]` — reading earlier returns the pre-trade snapshot and produces false "trade didn't land" reports.
+- [ ] Outcome reported in the user's original framing (their dollars or their units), with meaningful side effects (e.g. cash impact) noted — sent as a single bottom-line message, not as an interim "verifying…" plus a follow-up.
 
 ## References used by this walkthrough
 
