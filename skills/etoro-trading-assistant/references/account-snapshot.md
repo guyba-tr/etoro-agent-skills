@@ -70,7 +70,7 @@ Assuming **single-actor mode** (no other client opens or closes positions on thi
 - **Profit/Loss DRIFTS continuously** with market price movements on open positions. Even with no trading activity, this number changes second-to-second.
 - **Equity DRIFTS** because it includes Profit/Loss. Same reason.
 
-This matters for any workflow that expresses intent as a percentage (*"30% in BTC"*). Because equity drifts, recomputing `pct × current_equity` mid-workflow produces a different dollar amount than it did at the start — making the same intent resolve to different numbers depending on timing. **For workflows requiring percentage stability, freeze `EQUITY_ANCHOR` (and `CASH_ANCHOR`) at workflow start and use them for all sizing, sufficiency, and verification.** See `bulk-trading.md` §2, `rebalancing.md` §1, and `etoro-agent-portfolios` SKILL "freeze equity and cash at workflow start" for the full pattern.
+This matters for any workflow that expresses intent as a percentage (*"30% in BTC"*). Because equity drifts, recomputing `pct × current_equity` mid-workflow produces a different dollar amount than it did at the start — making the same intent resolve to different numbers depending on timing. **For workflows requiring percentage stability, freeze `EQUITY_ANCHOR` (and `CASH_ANCHOR`) at workflow start and use them for all sizing, sufficiency, and verification.** Full statement of the anchor-freeze invariant: `execution-invariants.md` §1. Workflow-specific application: `bulk-trading.md` §2, `rebalancing.md` §1, `conditional-rules.md` §4. Agent-portfolio strict-application override: `etoro-agent-portfolios` SKILL "Override B".
 
 ## 2. `position.openRate` is in the instrument's NATIVE currency
 

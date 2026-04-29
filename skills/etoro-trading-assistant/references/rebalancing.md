@@ -10,7 +10,7 @@ The execution borrows directly from `bulk-trading.md`; the new content here is t
 
 This workflow applies to **both regular eToro accounts and agent-portfolios**. Examples below use **dollar amounts** — the regular-account default.
 
-> **Agent-portfolio override:** if you reached this reference from the `etoro-agent-portfolios` skill, apply that skill's user-facing-numbers rule — replace dollar amounts with **percentages of equity** in every user-facing message. Internally compute `amount_usd = pct × equity` for the API calls. Endpoint shapes, validation rules, phase ordering, the 60-second cache wait, and the 20 req/min rate limit are all identical.
+> **Agent-portfolio override:** if you reached this reference from the `etoro-agent-portfolios` skill, apply **Override A** from that skill — replace dollar amounts with **percentages of equity** in every user-facing message. Internally compute `amount_usd = pct × EQUITY_ANCHOR` for the API calls. Endpoint shapes, validation rules, phase ordering, the 60-second cache wait, and the 20 req/min rate limit are all identical.
 
 ---
 
@@ -40,9 +40,9 @@ close_buffer     = ceil(shortfall × 0.01 × 100) / 100   // 1% of shortfall, ro
 close_target     = shortfall + close_buffer
 ```
 
-**Why the buffer.** The buffer is a **floor on the close** (i.e. close *at least* this much, slightly over the strict shortfall) — the mirror image of the ceiling-on-opens rule in `bulk-trading.md` §4. Without it, a tiny mismatch — partial-close `UnitsToDeduct` rounding to whole units, or any post-close fees nibbling the freed cash — can leave you 0.X% short of the target. That would force a corrective second close-then-wait-60s round, doubling the rebalance time and giving the user a confusing flow. Closing 1% of the shortfall over what's strictly needed eliminates that failure mode while leaving negligible cash idle.
+**Why the buffer.** This is the mirror image of the ceiling-on-opens rule (`execution-invariants.md` §2): closes round **UP**, opens round **DOWN**. Without the buffer, a tiny mismatch — partial-close `UnitsToDeduct` rounding to whole units, or post-close fees nibbling the freed cash — can leave you 0.X% short and force a corrective second close-then-wait-60s round. Closing 1% of the shortfall over what's strictly needed eliminates that failure mode while leaving negligible cash idle.
 
-**Direction of rounding:** the buffer is rounded UP (`ceil`), and the per-position close amounts must sum to ≥ `close_target` (also rounded such that we never close *less* than required). This is intentional: in the close phase we err in the direction of more freed cash, opposite to the open phase where we err in the direction of less spent cash.
+**Direction of rounding:** the buffer is rounded UP (`ceil`), and per-position close amounts must sum to ≥ `close_target`. In the close phase we err toward more freed cash; in the open phase we err toward less spent cash.
 
 If `shortfall ≤ 0`, this isn't a rebalance — execute the open(s) directly via `single-trade-walkthrough.md` (or `bulk-trading.md` for a multi-position open) without ever entering this reference.
 
@@ -101,18 +101,9 @@ This avoids the surprise of "I asked to open AAPL, why did MSFT shrink?" — the
 
 ## 1. Anchor equity and cash, read current state
 
-```
-pnl = GET /trading/info/{env}/pnl
-```
+Freeze `EQUITY_ANCHOR` and `CASH_ANCHOR` from a fresh `/pnl` read — see **`execution-invariants.md` §1** for the canonical anchor-freeze rule.
 
-**Freeze two anchors that don't change for the duration of this rebalance** (per `bulk-trading.md` §2):
-
-```
-EQUITY_ANCHOR = equity(pnl)         // unit of user intent — "rebalance to 30% in BTC" means 30% × EQUITY_ANCHOR
-CASH_ANCHOR   = available_cash(pnl) // execution constraint at workflow start
-```
-
-Use these for ALL sizing decisions in BOTH phases (closes and opens). Don't re-anchor between phases — the 60s PnL-cache wait happens with the anchors still locked; only the **live cash check** is re-read after the cache refresh, never the anchor.
+These anchors stay frozen across BOTH phases of the rebalance (closes and opens). The 60s PnL-cache wait between phases re-reads cash for **execution-readiness only** (a live check that closes settled), but never re-anchors. Sizing in Phase 2 still uses `EQUITY_ANCHOR`.
 
 Also compute, per `account-snapshot.md`:
 
@@ -183,7 +174,7 @@ If a target instrument is missing from current entirely, it goes to Phase 2 only
 
 ### Phase 2 — opens / increases
 
-For every instrument with positive diff (need to add) — apply `bulk-trading.md` §4 "Sizing — stated allocations are CEILINGS":
+For every instrument with positive diff (need to add) — apply `execution-invariants.md` §2 (ceilings):
 
 ```
 amount_usd = floor(target_pct × EQUITY_ANCHOR × 100) / 100   // for percentage targets
@@ -191,7 +182,7 @@ amount_usd = floor(target_pct × EQUITY_ANCHOR × 100) / 100   // for percentage
 ```
 
 - **If position doesn't currently exist**: standard bulk open with `Amount = amount_usd`.
-- **If position exists and target is higher**: open *another* order with `Amount = floor(diff_dollars × 100) / 100`. eToro doesn't have an "increase position" call — you place a second order alongside the existing position. (When summing for display, both will appear in `positions[]` and add together against the target.) The combined `position.amount` total must still satisfy the ceiling: `Σ position.amount on this instrument ≤ floor(target_pct × EQUITY_ANCHOR × 100) / 100`.
+- **If position exists and target is higher**: open *another* order with `Amount = floor(diff_dollars × 100) / 100`. eToro doesn't have an "increase position" call — place a second order alongside the existing one. (Both will appear in `positions[]` and add together against the target.) The combined `position.amount` total must still satisfy the ceiling: `Σ position.amount on this instrument ≤ floor(target_pct × EQUITY_ANCHOR × 100) / 100`.
 
 ---
 
@@ -226,10 +217,9 @@ For auto-rebalance mode, skip approval but log the plan internally before execut
 Use the same execution patterns as `bulk-trading.md` §4:
 
 - Pace ≥ 3 seconds between requests.
-- 429 backoff: 15s → 30s → 60s, max 3 retries per trade.
+- All POSTs follow `execution-invariants.md` §3 (at-most-once) — only 429 retried (15s → 30s → 60s, max 3); 4xx/5xx/ambiguous are reconciled at §6 verification by reading `positions[]`. **Never re-fire a close on ambiguity** — a duplicate partial close can over-liquidate the position.
+- **On 401: STOP the entire rebalance immediately** per invariants §4. Don't continue into Phase 2; report which closes succeeded; never describe a rebalance as "done" when it isn't.
 - Continue on individual non-429 failures; capture for the final report.
-- **At-most-once delivery applies to closes too** (per `bulk-trading.md` §4 "Response classification"). Only 429 is retried; 4xx/5xx and ambiguous responses (timeout, connection drop) are logged as failed/ambiguous and reconciled at the §6 verification step by reading `positions[]`. Never re-fire a close on ambiguity — a duplicate close on a partial-close payload can over-liquidate the position.
-- **On 401: STOP the entire rebalance immediately** (per `bulk-trading.md` and `sso-and-session.md` §§3–4). Don't continue into Phase 2 — all subsequent trades will fail with the same error. Report which closes succeeded and that the rebalance is incomplete; never describe a rebalance as "done" when it isn't.
 
 **The 20 req/min rate-limit budget is shared across opens AND closes** — track total trade-execution requests across both phases of this single rebalance.
 
@@ -284,14 +274,20 @@ Current allocation matches your target within $40 (or, in agent-portfolio contex
 
 ## 9. Sanity checks
 
-- [ ] **`EQUITY_ANCHOR` and `CASH_ANCHOR` frozen at workflow start** (§1) and used for sizing in BOTH phases. The 60s wait re-reads cash for execution-readiness only — it doesn't re-anchor.
+Cross-cutting invariants (covered by `execution-invariants.md`):
+
+- [ ] **Anchor freeze** — `EQUITY_ANCHOR` / `CASH_ANCHOR` frozen at workflow start (§1) and used for sizing in BOTH phases; the 60s wait re-reads cash for execution-readiness only.
+- [ ] **Ceilings on opens** — `amount_usd = floor(target_pct × EQUITY_ANCHOR × 100) / 100`; over-fills surfaced and corrected.
+- [ ] **At-most-once on every POST in BOTH phases** — only 429 retried; 4xx/5xx/ambiguous reconciled via `/pnl`, never re-fired. Critical on closes: a duplicated partial close can over-liquidate.
+- [ ] **On 401** — entire rebalance stops immediately; user is told which closes / opens succeeded; no "done" summary on a partial run.
+
+Rebalance-specific:
+
 - [ ] Diff is computed against current state (in dollars or weights, matching the user's target unit).
 - [ ] Target plan validated like a fresh bulk plan: not mixed-unit, sum ≤ `CASH_ANCHOR` (or ≤ 100%), ≤ 20 instruments, all `instrumentID`s resolved.
 - [ ] **Insufficient-cash variant: `close_target = shortfall + 1% of shortfall (rounded up)`** — closes are over-shot by this small buffer to avoid landing short and triggering a corrective second round.
-- [ ] **Closes round UP** (free at least `close_target`, never less) — opposite direction from opens which floor.
-- [ ] **Opens round DOWN — stated allocations are CEILINGS**: `amount_usd = floor(target_pct × EQUITY_ANCHOR × 100) / 100`. Any over-fill is flagged at verification and a corrective partial close is offered.
+- [ ] **Closes round UP** (free at least `close_target`, never less) — mirror image of the ceilings-on-opens rule.
 - [ ] Phase 1 (closes) completes BEFORE Phase 2 (opens) begins.
-- [ ] **At-most-once delivery on every POST in both phases** — only 429 is retried; 4xx/5xx/ambiguous are reconciled by reading `/pnl`, never by re-firing. Especially important on closes: a duplicated partial close can over-liquidate the position.
 - [ ] **60-second PnL cache wait between phases** — non-negotiable.
 - [ ] Live cash re-verified after closes (`liveCash ≥ Σ planned_opens`); the buffer should make this comfortable — if short anyway, investigate (silent close failure? pending orders?) before proceeding.
 - [ ] Rate-limit budget tracked across BOTH phases; no assumption of a fresh 20/min after the cache wait.

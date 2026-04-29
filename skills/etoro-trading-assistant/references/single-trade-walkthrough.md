@@ -15,7 +15,7 @@ Source guides:
 
 This walkthrough applies to **both regular eToro accounts and agent-portfolios**. Examples below use **dollar amounts** — the regular-account default.
 
-> **Agent-portfolio override:** if you reached this walkthrough from the `etoro-agent-portfolios` skill, apply that skill's user-facing-numbers rule — replace dollar amounts with **percentages of equity** in every user-facing message (intent confirmation, error messages, outcome reports). Internally the API still takes USD `Amount` values; convert via `amount_usd = pct × equity`. The endpoint shapes, validation rules, and timing are unchanged.
+> **Agent-portfolio override:** if you reached this walkthrough from the `etoro-agent-portfolios` skill, apply **Override A** from that skill — replace dollar amounts with **percentages of equity** in every user-facing message (intent confirmation, error messages, outcome reports). Internally the API still takes USD `Amount` values; convert via `amount_usd = pct × EQUITY_ANCHOR`. The endpoint shapes, validation rules, and timing are unchanged.
 
 ---
 
@@ -23,7 +23,7 @@ This walkthrough applies to **both regular eToro accounts and agent-portfolios**
 
 - A single market-open or market-close from the user.
 - A single limit-order setup.
-- The user's request fits in one trade. ("Buy AAPL, MSFT, and TSLA at 5% each" → that's a bulk action, load `etoro-agent-portfolios/references/bulk-trading.md` instead.)
+- The user's request fits in one trade. ("Buy AAPL, MSFT, and TSLA at 5% each" → that's a bulk action, load `bulk-trading.md` instead.)
 
 ---
 
@@ -179,20 +179,18 @@ Per `api-conventions.md` "Other optional parameters", omit anything the user did
 
 #### At-most-once: never retry on ambiguity
 
-Trade-execution POSTs are not idempotent. If the response is **2xx with an order ID**, the trade is done — move on. If it's an **explicit error** (4xx other than 429, or 5xx with a body), log it and stop — *do not retry the same payload*. If the outcome is **ambiguous** (timeout, connection reset, no response, parse error), assume the trade may have landed: **do not retry** — go straight to Step 7 verification and check `positions[]` / `ordersForOpen[]`. Only **429** is a safe-to-retry response (the server explicitly told you it didn't process the request).
-
-A duplicate position is far worse than a missing one — the missing case is recoverable by deliberately re-placing after verification; the duplicate has already executed. Full classification table and rationale: `bulk-trading.md` §4 "Response classification — at-most-once delivery".
+Trade-execution POSTs follow the at-most-once rule in `execution-invariants.md` §3. **2xx with an order ID** → done, move on. **Explicit error** (4xx non-429, or 5xx) → log and stop, don't retry the same payload. **Ambiguous outcome** (timeout, connection reset, no response, parse error) → don't retry; go straight to Step 7 and check `positions[]` / `ordersForOpen[]`. Only **429** is safe to retry.
 
 #### Sizing — stated percentages are CEILINGS
 
-When the user expresses intent as a percentage (*"buy 5% of equity in BTC"*) — common on agent-portfolios, occasional on regular accounts — the stated percentage is an **upper bound**, not a target. Apply the same anchor-and-floor rule from `bulk-trading.md` §§ 2 + 4:
+When the user expresses intent as a percentage (*"buy 5% of equity in BTC"*) — common on agent-portfolios, occasional on regular accounts — apply the ceilings rule from `execution-invariants.md` §2:
 
 ```
 EQUITY_ANCHOR = equity from a fresh /pnl read at the start of this trade
 amount_usd    = floor(pct × EQUITY_ANCHOR × 100) / 100
 ```
 
-Send `Amount: amount_usd` exactly. Never round up to a "nicer" number. Since eToro has no amount-slippage, the resulting `position.amount / EQUITY_ANCHOR` lands at or just under the stated cap — never above. After Step 7 verification, if `position.amount` somehow exceeds the floored expected amount, treat it as an agent-side bug and offer a corrective partial close (per `bulk-trading.md` §5 "Over-allocation check"). For dollar-form intents the same discipline applies in mirror image — *"buy $300 of BTC"* means send `$300` exactly, not `$305` for cleanliness.
+Send `Amount: amount_usd` exactly. Mirror image for dollar-form intents — *"buy $300 of BTC"* means send `$300`, not `$305` for cleanliness. Step 7 verification surfaces any over-fill (which would be an agent-side bug) and offers a corrective partial close.
 
 ### Step 7 — Verify the order landed
 
@@ -210,11 +208,11 @@ If the failure was a **401** (the credential is no longer valid — typically th
 
 - For a **single open**: read `/pnl` immediately after the POST returns. `positions[]` typically updates promptly for fills; the 60-second cache mostly affects derived values like account-level P&L. If the position is in `positions[]`, you're done.
 - For a **single close**: confirm the position is **gone** from `positions[]` (full close) or has **smaller `units`** (partial close). If neither happened after a re-read, treat as failed.
-- **If you'll execute another trade right after that depends on freed cash**: wait the full 60 seconds before reading `/pnl` again — Available Cash relies on `credit` and `ordersForOpen` aggregation, which are subject to the cache. (This pattern usually means you're about to enter the rebalance flow — load `etoro-agent-portfolios/references/rebalancing.md`.)
+- **If you'll execute another trade right after that depends on freed cash**: wait the full 60 seconds before reading `/pnl` again — Available Cash relies on `credit` and `ordersForOpen` aggregation, which are subject to the cache. (This pattern usually means you're about to enter the rebalance flow — load `rebalancing.md`.)
 
 ### Step 8 — Report back
 
-Tell the user the outcome in their original framing — **dollars and units, not percentages of equity**. (Percentages of equity are only used for agent-portfolios, per that skill's user-facing-numbers rule. Regular accounts always use absolute dollar amounts.)
+Tell the user the outcome in their original framing — **dollars and units, not percentages of equity**. (Percentages of equity are only used for agent-portfolios, per Override A in that skill. Regular accounts always use absolute dollar amounts.)
 
 - *"Bought $1,000 of AAPL at $179.50 (5.6 units)."*
 - *"Order accepted — will fill when the US market opens (in ~3 hours)."*
@@ -234,15 +232,21 @@ Include side effects when meaningful (e.g. *"Available cash dropped from $8,000 
 
 ## Sanity checks
 
+Cross-cutting invariants (covered by `execution-invariants.md`):
+
+- [ ] **For percentage intents** — anchor freeze (§1) applied; `amount_usd = floor(pct × EQUITY_ANCHOR × 100) / 100` (§2 ceilings); over-fill at verification triggers a corrective partial close.
+- [ ] **At-most-once** (§3) — only 429 retried; 4xx/5xx and ambiguous outcomes reconciled by reading `positions[]`, never by re-firing.
+- [ ] **On 401** (§4) — workflow stops; user is told no trade was placed; for mid-session 401, partial state is reported explicitly.
+
+Single-trade-specific:
+
 - [ ] Environment confirmed (real or demo) before the first trade in the session.
 - [ ] Symbol resolved to a verified `instrumentId`; exact-match check on `internalSymbolFull` performed.
 - [ ] For opens: Available Cash computed via `account-snapshot.md` §1 and verified ≥ requested amount.
 - [ ] For closes: `positionId` looked up from `positions[]`, not assumed; if multiple positions exist on the same instrument, the user picked which one.
 - [ ] User confirmed the trade in plain language before POST (unless auto-execute is opted in).
 - [ ] `Leverage: 1` sent explicitly when not specified.
-- [ ] **For percentage intents: `amount_usd = floor(pct × EQUITY_ANCHOR × 100) / 100`** with `EQUITY_ANCHOR` from a fresh `/pnl` read at trade start; never rounded up; the stated percentage is a CEILING.
-- [ ] **At-most-once: only 429 is retried; 4xx/5xx and ambiguous outcomes are reconciled by reading `positions[]`, never by re-firing the same payload.**
-- [ ] Post-execution: `/pnl` re-read and trade categorized as filled / pending / failed; pending-market-open distinction surfaced. For percentage intents, `position.amount ≤ floor(pct × EQUITY_ANCHOR × 100) / 100`; over-fill triggers a corrective partial close (per `bulk-trading.md` §5).
+- [ ] Post-execution: `/pnl` re-read and trade categorized as filled / pending / failed; pending-market-open distinction surfaced.
 - [ ] Outcome reported in the user's original framing (their dollars or their units), with meaningful side effects (e.g. cash impact) noted.
 
 ## References used by this walkthrough

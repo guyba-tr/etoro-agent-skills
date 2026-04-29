@@ -10,7 +10,7 @@ This pattern wraps the standard single-trade open/close primitives (in `single-t
 
 This workflow applies to **both regular eToro accounts and agent-portfolios**. Examples below use **dollar amounts** — the regular-account default.
 
-> **Agent-portfolio override:** if you reached this reference from the `etoro-agent-portfolios` skill, apply that skill's user-facing-numbers rule — replace dollar amounts with **percentages of equity** in every user-facing message (rule confirmations, trigger notifications, failure reports). Internally the rule's `size` field can hold either a dollar amount or a percentage; convert via `amount_usd = pct × equity` at trigger time. The condition definitions, polling cadence, cooldowns, and safety controls don't change.
+> **Agent-portfolio override:** if you reached this reference from the `etoro-agent-portfolios` skill, apply **Override A** from that skill — replace dollar amounts with **percentages of equity** in every user-facing message (rule confirmations, trigger notifications, failure reports). Internally the rule's `size` field can hold either a dollar amount or a percentage; convert via `amount_usd = pct × EQUITY_ANCHOR` at trigger time. The condition definitions, polling cadence, cooldowns, and safety controls don't change.
 
 ---
 
@@ -154,9 +154,9 @@ The `dispatchAction` call goes through `single-trade-walkthrough.md`'s flow — 
 - Pre-flight available cash for `open` and `increase_to` actions.
 - Use `UnitsToDeduct` correctly for `partial_close` and `reduce_to`.
 
-**Anchor freeze at trigger-fire time.** Each `dispatchAction` invocation IS a workflow — read `/pnl` fresh and freeze `EQUITY_ANCHOR` + `CASH_ANCHOR` per `bulk-trading.md` §2, exactly as you would for a one-shot trade. **Do NOT** carry an anchor over from one trigger to the next — between fires, the market drifts and so does equity. Each trigger gets its own anchor, valid only for that single dispatch.
+**Each trigger fire IS its own workflow** — apply the full set of `execution-invariants.md` rules: read `/pnl` fresh, freeze `EQUITY_ANCHOR` + `CASH_ANCHOR` (§1), apply ceilings on size (§2), at-most-once on the POST (§3), stop on 401 (§4 — see "If the failure was a 401" in §6 below for the conditional-rules-specific handling). **Do NOT carry an anchor over from one trigger to the next** — between fires, the market drifts and so does equity.
 
-For percentage-form rules (`size: { weight: 0.025 }` on agent-portfolios, common case), apply the ceiling rule: `amount_usd = floor(weight × EQUITY_ANCHOR × 100) / 100`. Per `bulk-trading.md` §4 "Sizing — stated allocations are CEILINGS", floor never round; verify against the anchor (not against current equity) post-fill; over-fills get a corrective partial close.
+For percentage-form rules (`size: { weight: 0.025 }`, common on agent-portfolios), `amount_usd = floor(weight × EQUITY_ANCHOR × 100) / 100`.
 
 ---
 
@@ -172,22 +172,13 @@ For percentage-form rules (`size: { weight: 0.025 }` on agent-portfolios, common
 
 - Recommend `max_triggers` ≤ 5 for any rule unless the user explicitly wants unbounded.
 - Combined with cooldowns, this caps a runaway rule at "5 trades over 5 hours" for a 1h cooldown.
-
-### Global rate-limit budget
-
-- Across ALL active rules, total triggered trades ≤ **100 per day**.
-- This is a soft cap to keep the user from accidentally creating a self-DoSing bot. If approaching, pause the lowest-priority rule and notify the user.
+- This is the primary safety control. Per-rule caps + cooldowns are the runtime-friendly way to prevent runaway behavior; global caps and per-rule outcome-history circuit breakers would require persistent agent-side state that most runtimes don't expose to skills.
 
 ### Confirmation on activation
 
 - Echo the structured rule back before turning it on (see §1).
 - Tell the user **how to disable**: *"Reply 'pause AAPL rule' anytime."*
 - Tell them how triggers will be communicated (see §6 below).
-
-### Max-loss circuit breaker (optional but recommended)
-
-- Track recent trade outcomes per rule.
-- If `N` consecutive losing trades fire from the same rule (default `N = 3`), auto-disable and notify the user. Better to ask "Should I keep going?" than burn through capital silently.
 
 ---
 
@@ -237,14 +228,19 @@ Rule triggered: AAPL fell below $180 → opened 2.5% allocation.
 
 ## 7. Sanity checks
 
+Cross-cutting invariants (covered by `execution-invariants.md`):
+
+- [ ] **Each `dispatchAction` is its own workflow** — fresh `/pnl` read; `EQUITY_ANCHOR` + `CASH_ANCHOR` frozen for that single dispatch (§1); never carried over from a previous trigger or from rule creation.
+- [ ] **For percentage-form rules** — stated weight is a CEILING (§2): `amount_usd = floor(weight × EQUITY_ANCHOR × 100) / 100`; over-fills surfaced and corrected.
+- [ ] **At-most-once on the trigger POST** (§3) — only 429 retried; ambiguous outcomes reconciled at verification.
+- [ ] **On 401** (§4) — the trigger trade is reported honestly; per §6, all rules using the same credential are auto-paused.
+
+Conditional-rules-specific:
+
 - [ ] Rules are stored in a structured form (not free-text), with `instrumentID` resolved at creation time.
 - [ ] User confirms the rule shape before activation; "how to pause" is communicated.
 - [ ] Live-price triggers use `/market-data/instruments/rates`; PnL-based triggers use the PnL endpoint at its 60s cadence.
 - [ ] Cooldown set on every rule (default 1h) to prevent rapid re-firing.
 - [ ] `max_triggers` defaulted to 5 unless user requested otherwise.
-- [ ] **Each `dispatchAction` freezes its own `EQUITY_ANCHOR` + `CASH_ANCHOR` from a fresh `/pnl` read** — never carried over from a previous trigger or from rule creation.
-- [ ] **For percentage-form rules: stated weight is a CEILING** — `amount_usd = floor(weight × EQUITY_ANCHOR × 100) / 100`; over-fills are surfaced and corrected (per `bulk-trading.md` §5).
-- [ ] Daily global trigger budget tracked; high-volume rules paused before they consume the whole 20 req/min trade-execution limit.
 - [ ] Pending-market-open status surfaced when the triggered trade can't fill immediately.
 - [ ] Communication uses the user's unit (dollars on regular accounts; percentages in agent-portfolio context); units consistent throughout the rule's lifecycle.
-- [ ] Optional max-loss circuit breaker considered for high-frequency rules.

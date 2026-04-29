@@ -10,7 +10,7 @@ The agent's job here is to execute many opens accurately, respect the 20 req/min
 
 This workflow applies to **both regular eToro accounts and agent-portfolios**. Examples below use **dollar amounts** — the regular-account default.
 
-> **Agent-portfolio override:** if you reached this reference from the `etoro-agent-portfolios` skill, apply that skill's user-facing-numbers rule — replace dollar amounts with **percentages of equity** in every user-facing message (confirmations, reports, error explanations). Internally you still compute `amount_usd = pct × equity` to make the API calls (the API always takes USD); the user just never sees the dollar number. Endpoint shapes, validation rules, rate limits, and timing are all identical.
+> **Agent-portfolio override:** if you reached this reference from the `etoro-agent-portfolios` skill, apply **Override A** from that skill — replace dollar amounts with **percentages of equity** in every user-facing message (confirmations, reports, error explanations). Internally you still compute `amount_usd = pct × EQUITY_ANCHOR` to make the API calls (the API always takes USD); the user just never sees the dollar number. Endpoint shapes, validation rules, rate limits, and timing are all identical.
 
 ---
 
@@ -59,18 +59,9 @@ These checks happen against the frozen anchors from §2 (read `/pnl` first if yo
 
 ## 2. Anchor equity and cash for the workflow
 
-Before sizing or executing anything, fetch the account state and **freeze two anchors** that don't change for the duration of this workflow:
+Before sizing or executing anything, freeze `EQUITY_ANCHOR` and `CASH_ANCHOR` from a fresh `/pnl` read — see **`execution-invariants.md` §1** for the canonical anchor-freeze rule and rationale.
 
-```
-pnl = GET /trading/info/{env}/pnl
-
-EQUITY_ANCHOR = equity(pnl)         // unit of user intent: "X% in symbol Y" means X% × EQUITY_ANCHOR
-CASH_ANCHOR   = available_cash(pnl) // execution constraint at workflow start
-```
-
-Use the formulas in `account-snapshot.md` §1 to compute both. **Neither value is recomputed mid-workflow** — every sizing decision, every cumulative check, and every post-fill verification compares against these frozen numbers.
-
-> **Why freeze.** Equity drifts with market movement on existing positions; cash is stable in single-actor mode (no other client opening or closing positions on the account). If the agent recomputed `pct × current_equity` mid-flow, the same "30% in BTC" intent would resolve to different dollar amounts depending on when the calculation ran — and the post-fill percentage would slide too. Freezing makes percentages deterministic and verifiable.
+Both values are used for ALL sizing decisions, the cumulative `spent_so_far` check (§4), and post-execution verification (§5). Neither is recomputed mid-workflow.
 
 ### Sufficiency check
 
@@ -146,23 +137,16 @@ Always send `Leverage: 1` unless the user explicitly asked for leverage (per `ap
 
 ### Sizing — stated allocations are CEILINGS, not targets
 
-Every percentage and dollar amount the user agreed to is an **upper bound**. The actual filled allocation must be ≤ the stated figure. **Always under-fill rather than over-fill** — a small under-allocation is invisible and recoverable; an over-allocation requires an unwinding partial close, surprises the user, and can incur fees/spread on the corrective trade.
+Apply `execution-invariants.md` §2 (the canonical ceilings rule) to every trade in the batch. Bulk-specific application:
 
-**Three rules together guarantee the ceiling:**
-
-1. **Floor when converting percentage → dollars.** Anchor on `EQUITY_ANCHOR` from §2 (NOT current equity). Floor to cents — never round to a "nice number" like $300 when the math gives $295.40.
-  ```
-   amount_usd = floor(pct × EQUITY_ANCHOR × 100) / 100
-  ```
-2. **Cumulative check before each send.** Maintain `spent_so_far`. Before firing trade `i`, verify:
-  ```
+1. **Floor when converting**: `amount_usd[i] = floor(pct_i × EQUITY_ANCHOR × 100) / 100`. Never round up; never round to "nice numbers" like $300 when math gives $295.40.
+2. **Cumulative check before each send.** Maintain `spent_so_far`. Before firing trade `i`:
+   ```
    spent_so_far + amount_usd[i] ≤ Σ planned amount_usd  (= total_planned from §2)
    spent_so_far + amount_usd[i] ≤ CASH_ANCHOR
-  ```
-   If either constraint would be violated, that's an arithmetic bug in the planner — abort the batch and recompute, do **not** silently shrink-and-fire (the user agreed to a specific plan).
-3. **Send the floored dollar amount.** Since eToro has no amount-slippage (`Amount: $X → position.amount = $X` exactly), the floored amount IS the exact filled value. The percentage of `EQUITY_ANCHOR` lands at or just under the stated cap.
-
-For **dollar-form plans** the same discipline applies in mirror image — the user's stated dollar figure is the ceiling. Don't round up "$295" to "$300" for cleanliness; send `$295` exactly.
+   ```
+   If violated, abort the batch and recompute — don't silently shrink-and-fire (the user agreed to a specific plan).
+3. **Send the floored amount exactly.** Since eToro has no amount-slippage, the floored amount IS the filled value. Mirror image for dollar-form plans — *"$295"* means send `$295`, not `$300` for cleanliness.
 
 ### Pacing
 
@@ -172,38 +156,14 @@ For **dollar-form plans** the same discipline applies in mirror image — the us
 
 ### Response classification — at-most-once delivery
 
-**Trade-execution POSTs are not idempotent.** The eToro API has no idempotency key on `/market-open-orders/`* or `/market-close-orders/*`, so resending the same request after an ambiguous outcome can — and does — produce duplicate positions. Treat every trade request with the **at-most-once** discipline:
+Every trade in the batch follows the at-most-once rule from `execution-invariants.md` §3 — only 429 triggers a same-payload retry (cadence: 15s → 30s → 60s, max 3); 4xx (non-429), 5xx, and ambiguous outcomes (timeout / connection drop / no response) are logged and reconciled at the §5 verification step, never re-fired.
 
+Bulk-specific application:
 
-| Outcome                                                                | Meaning                                                     | Action                                                                                                             |
-| ---------------------------------------------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| **HTTP 200 / 201** with a body containing an `orderId` (or equivalent) | Server accepted and recorded the order                      | **Done. Don't resend. Move on.**                                                                                   |
-| **HTTP 4xx** (except 429) — `400`, `403`, `404`, etc.                  | Server rejected the request explicitly; nothing was placed  | Log as failed; safe to surface to the user; **do not retry the same payload** (a 400 won't become a 200)           |
-| **HTTP 401**                                                           | Credentials invalid                                         | **STOP the entire batch.** See "Per-trade failure handling" below.                                                 |
-| **HTTP 429**                                                           | Rate-limited; server explicitly told you it didn't process  | Safe to retry (the only safe retry case) — see "429 backoff" below                                                 |
-| **HTTP 5xx** with a body                                               | Server processed and failed                                 | Log as failed; **do not retry** — you don't know whether the order was placed before the failure                   |
-| **Timeout / connection reset / no response / parse error**             | Truly ambiguous — the order may or may not have been placed | **Do not retry.** Mark the trade as ambiguous, continue the batch, and let §5 verification reconcile it via `/pnl` |
-
-
-**Why "do not retry" on ambiguous and 5xx outcomes:** the request might have reached the server, executed, and the response was lost on the way back. A retry in that case opens a duplicate position — the exact failure mode users hit. A missing position is recoverable (verify, then place it again deliberately); a duplicate is messy to unwind.
-
-The only response that justifies a same-payload retry is **429** (the server explicitly tells you it didn't process the request). Everything else either succeeded, failed cleanly, or is ambiguous — and ambiguous gets resolved at verification time, not by hopeful re-firing.
-
-### 429 backoff
-
-429 is the **one** retry-safe failure mode (the server explicitly states the request wasn't processed):
-
-- First 429: wait **15 seconds**, retry the same trade.
-- Second 429 on the same trade: wait **30 seconds**, retry.
-- Third: wait **60 seconds**, retry.
-- After three failures, mark the trade as failed and continue with the next.
-
-### Per-trade failure handling
-
-- **401 errors: STOP the entire batch immediately.** A 401 means the API credentials are no longer valid — typically the user revoked their `x-user-key` mid-session. Subsequent trades would all fail with the same error. **Do not continue.** Report which trades succeeded BEFORE the 401 explicitly to the user — naming each instrument and amount — and ask them to provide a new key. **Never describe the build as "complete" when it isn't.** See `sso-and-session.md` §§3–4 for the full recovery flow and communication template.
-- **Other non-429 errors (400, 5xx) on an individual order:** log, capture the failure, **continue with the remaining trades**. Don't abort the whole batch — partial success is more useful than nothing. **Do not retry these** (per the at-most-once rule above); reconcile their actual state at verification.
+- **On 401: STOP the entire batch immediately** (per invariants §4). Subsequent trades would all fail with the same error. Report which trades succeeded BEFORE the 401 explicitly — naming each instrument and amount — and ask the user for a new credential. Never describe the build as "complete" when it isn't. See `sso-and-session.md` §§3–4.
+- **Other non-429 errors (400, 5xx) on an individual order:** log, capture the failure, **continue with the remaining trades**. Don't abort the whole batch — partial success is more useful than nothing.
 - **Ambiguous outcomes (timeout, connection drop):** log as `ambiguous`, continue the batch. Verification in §5 determines whether the order actually landed.
-- Capture per-trade outcomes — note the four-state status (not just ok/failed):
+- Capture per-trade outcomes — use the four-state status from invariants §3:
 
 ```typescript
 type TradeStatus =
@@ -279,29 +239,14 @@ This is the entire point of the at-most-once + post-batch verification pattern: 
 
 ### Over-allocation check (against the frozen anchor)
 
-For every position that landed in `positions[]`, verify the actual fill against the §2 anchor and the §4 sizing rule:
+For every position that landed in `positions[]`, verify per `execution-invariants.md` §2 ("Verify against the anchor, not against current equity"):
 
 ```
-expected_amount = floor(stated_pct × EQUITY_ANCHOR × 100) / 100   // or the user's stated dollar figure for dollar plans
+expected_amount = floor(stated_pct × EQUITY_ANCHOR × 100) / 100   // or the user's stated dollar figure
 actual_amount   = position.amount
-
-if actual_amount > expected_amount:
-  // CEILING VIOLATION — the agent's own arithmetic produced an over-allocation.
-  // Surface it AND offer a corrective partial close.
 ```
 
-Since eToro has no amount-slippage, `actual_amount` should equal `expected_amount` exactly. Any over-fill is genuinely an agent-side bug — most often: an inflated equity reference, a round-up bug, or a compounded-base error. **Do not** silently accept an over-allocation.
-
-When detected, present it clearly and offer the fix:
-
-```
-⚠ BTC filled at $305 (30.5% of equity). Stated cap was 30% ($300).
-This is an over-allocation by $5. Trim by partial-closing $5 of BTC to bring it to exactly 30%? [Y/n]
-```
-
-Compute the corrective close as `over = actual_amount − expected_amount`, then partial-close `over` worth of the position (translate to `UnitsToDeduct` per `single-trade-walkthrough.md` Step 6). Apply the at-most-once discipline to the corrective close too — don't retry on ambiguous outcomes; re-verify via `/pnl` instead.
-
-Verify allocation against `EQUITY_ANCHOR`, not against current/post-execution equity. Equity may have moved with market action on other positions during the build — a position's percentage of *current* equity can drift even when its dollar size is exactly correct. The anchor is the user's intent; current equity is the moving market.
+Any `actual_amount > expected_amount` is a ceiling violation (agent-side bug). Surface it clearly and offer a corrective partial close — `over = actual_amount − expected_amount`, then partial-close `over` worth of the position (translate to `UnitsToDeduct` per `single-trade-walkthrough.md` Step 6). The corrective close itself follows at-most-once (invariants §3) — re-verify via `/pnl`, don't retry on ambiguity.
 
 ### Communication template
 
@@ -333,17 +278,21 @@ If anything failed, surface the failures explicitly with the error reason and su
 
 ## 6. Sanity checks
 
-- Plan input validated: dollar form OR percentage form, not mixed.
-- `**EQUITY_ANCHOR` and `CASH_ANCHOR` frozen at workflow start** (§2) and used for ALL sizing, sufficiency, and verification — never recomputed mid-flow.
-- Sufficiency check passed: `Σ amount_usd ≤ CASH_ANCHOR` (and for percentages, also `Σ ≤ 100%`).
-- ≤ 20 instruments recommended (warn the user if more).
-- All `instrumentID`s resolved up front; partial-resolution plans rejected entirely.
-- **Sizing — stated allocations are CEILINGS**: `amount_usd = floor(pct × EQUITY_ANCHOR × 100) / 100`; never round up; never round to "nice numbers"; cumulative `spent_so_far + next_amount ≤ total_planned` checked before each send.
-- Trade-execution requests spaced ≥3s; 429 handled with 15s → 30s → 60s backoff; per-trade limit of 3 retries.
-- **At-most-once delivery enforced**: only 429 triggers a same-payload retry. 4xx (except 429), 5xx, and ambiguous outcomes (timeout / connection drop / no response) are never retried — they're reconciled at verification time via `/pnl`. This is the duplicate-position prevention rule.
-- **On 401: stop the entire batch immediately, report which trades succeeded before the failure, ask for a new credential.** Never report the batch as "complete" when it isn't.
-- Other per-trade failures (400, 5xx) are logged and reported but don't abort the batch and are never retried.
-- Post-execution: 60s wait, then `/pnl` re-read; results categorized as filled / pending / failed / ambiguous-but-missing against the plan; ambiguous trades resolved by checking `positions[]`/`ordersForOpen[]`, never by re-firing.
-- **Over-allocation check** (§5): for each filled position, `actual_amount ≤ floor(stated_pct × EQUITY_ANCHOR × 100) / 100`. Any over-fill is flagged and a corrective partial close is offered. Allocation is verified against `EQUITY_ANCHOR`, NOT current/post-execution equity.
-- User-facing report uses **the same unit the user gave you** (dollars on regular accounts; percentages in agent-portfolio context); pending-market-open distinction explicitly surfaced; percentages reported are computed against `EQUITY_ANCHOR`, not current equity.
+Cross-cutting invariants (covered by `execution-invariants.md`):
+
+- [ ] **Anchor freeze** — `EQUITY_ANCHOR` / `CASH_ANCHOR` frozen at workflow start and used for ALL sizing, sufficiency, and verification.
+- [ ] **Ceilings** — `amount_usd = floor(pct × EQUITY_ANCHOR × 100) / 100`; cumulative `spent_so_far + next ≤ total_planned ≤ CASH_ANCHOR` checked before each send; post-fill verification against `EQUITY_ANCHOR`, not current equity; over-fills surfaced and corrected via partial close.
+- [ ] **At-most-once** — only 429 retried (15s → 30s → 60s, max 3); 4xx (non-429), 5xx, and ambiguous outcomes reconciled at verification time via `/pnl`, never re-fired.
+- [ ] **On 401** — entire batch stops immediately; user is told which trades succeeded and which never executed; no "complete" summary on a partial run.
+
+Bulk-specific:
+
+- [ ] Plan input validated: dollar form OR percentage form, not mixed.
+- [ ] Sufficiency check passed: `Σ amount_usd ≤ CASH_ANCHOR` (and for percentages, also `Σ ≤ 100%`).
+- [ ] ≤ 20 instruments recommended (warn the user if more).
+- [ ] All `instrumentID`s resolved up front; partial-resolution plans rejected entirely.
+- [ ] Trade-execution requests spaced ≥ 3s; 20 req/min budget tracked.
+- [ ] Other per-trade failures (400, 5xx) logged and reported but don't abort the batch.
+- [ ] Post-execution: 60s wait, then `/pnl` re-read; results categorized as filled / pending / failed / ambiguous-but-missing; ambiguous resolved by reading `positions[]`/`ordersForOpen[]`.
+- [ ] User-facing report uses the same unit the user gave you (dollars on regular accounts; percentages in agent-portfolio context); pending-market-open distinction explicitly surfaced.
 

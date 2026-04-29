@@ -1,30 +1,24 @@
 ---
 name: etoro-agent-portfolios
-description: Runtime skill for the eToro agent-portfolios product — dedicated copy-traded accounts where positions opened on the agent-portfolio are mirrored proportionally into the user's real account based on the user's `investmentAmountInUsd`. Covers the conversational onboarding flow (key collection with type detection, portfolio creation, key handoff) plus the user-facing-numbers override (percentages of equity, never dollars) and the always-check-equity-first execution rule. MUST BE LOADED ALONGSIDE `etoro-trading-assistant` — agent-portfolio trade execution uses that skill's workflow references (single trade, bulk trading, rebalancing, conditional rules) with this skill's overrides applied. Use when an end user wants to create an agent-portfolio, list existing ones, or have the agent execute trades on an agent-portfolio's behalf.
+description: Create and operate eToro agent-portfolios — dedicated copy-traded accounts whose trades are mirrored proportionally into the user's real eToro account. Covers the onboarding flow (API key collection, portfolio creation, secret-token handoff) and the agent-portfolio-specific execution overrides (percentages of equity in user-facing output instead of dollars; freeze live equity and cash before every workflow). Use when the user mentions agent-portfolios, asks to create or set up an agent-portfolio, list existing agent-portfolios, copy-trade through one, or have the agent operate trades on an agent-portfolio's behalf. Load alongside `etoro-trading-assistant` — that skill carries the actual trade-execution workflows.
 ---
 
 # eToro Agent Portfolios
 
-Use this skill when the user wants to **create or operate an agent-portfolio**. This skill assumes `etoro-trading-assistant` is also loaded — agent-portfolio trade execution uses the same workflows (single trade, bulk build, rebalancing, conditional rules) as a regular account, just with this skill's display-format override.
+Use this skill when the user wants to **create or operate an agent-portfolio**. This skill assumes `etoro-trading-assistant` is also loaded — agent-portfolio trade execution uses the same workflows (single trade, bulk build, rebalancing, conditional rules) as a regular account, with two agent-portfolio-specific overrides applied throughout.
 
-> ⚠️ **Don't try to handle agent-portfolio trades using only this skill.** All execution flows live in `etoro-trading-assistant`. This skill carries only what's *different* about agent-portfolios — which is just: the product concept, the onboarding flow, and the user-facing-numbers rule.
-
-## What agent-portfolios share with regular accounts
-
-Trade execution against an agent-portfolio uses identical infrastructure to a regular account: same Public API endpoints, same headers (`x-request-id`, hardcoded `x-api-key`), same rate limits (20 req/min on trade-execution endpoints), same 60-second PnL cache, same single-trade and bulk and rebalance and conditional-rule workflows. **Load `etoro-trading-assistant` and follow its references for execution.**
-
-The only execution difference: the `x-user-key` header carries the agent-portfolio's `userToken` (from creation, see Step 3 below) instead of the user's main account API user-key. Everything else is unchanged.
+> ⚠️ **Don't try to handle agent-portfolio trades using only this skill.** All execution flows live in `etoro-trading-assistant`. This skill carries only what's *different* about agent-portfolios — the product concept, the onboarding flow (in `references/onboarding.md`), and the two execution overrides below.
 
 ## What's different about agent-portfolios
 
-Three things, plus the onboarding flow:
+Trade execution against an agent-portfolio uses identical infrastructure to a regular account: same Public API endpoints, same headers, same rate limits, same 60-second PnL cache, same workflows (single trade, bulk, rebalance, conditional rules). The only execution difference is that the `x-user-key` header carries the agent-portfolio's `userToken` (from creation; see `references/onboarding.md`) instead of the user's main-account key.
 
-1. The **product concept** (mirrored copy-trading; the agent-portfolio is the *source* portfolio whose trades are mirrored proportionally into the user's real account).
-2. The **user-facing-numbers rule** (percentages of equity, never dollars).
-3. The **always-check-equity-first execution rule** — before any workflow, read live equity and cash from `/pnl`; never assume a fixed value.
-4. The **onboarding flow** (Steps 1–3 below: collect key → detect type → create portfolio).
+What's specific to agent-portfolios:
 
-Once an agent-portfolio is created and you have its `userToken`, you operate on it through `etoro-trading-assistant` exactly as you would a regular account — *except* you apply the user-facing-numbers and always-check-equity rules to every workflow.
+1. The **product concept** (mirrored copy-trading; see below).
+2. The **onboarding flow** — `references/onboarding.md` (key collection → type detection → portfolio creation → secret-token handoff).
+3. **Override A — percentages of equity in user-facing output** (never dollars). Applies to every user-facing message in every workflow loaded from `etoro-trading-assistant`.
+4. **Override B — always read live equity and cash from `/pnl` before every workflow.** This is a hard rule on top of the general anchor-freeze invariant in `etoro-trading-assistant/references/execution-invariants.md` §1; see "Override B" below for why it's specifically critical here.
 
 ## The agent-portfolio concept
 
@@ -34,42 +28,7 @@ When the user creates one, they specify an `investmentAmountInUsd` which is **re
 
 The agent trades on behalf of the agent-portfolio using **the agent-portfolio's own user token**. All endpoints are the **real** Public API endpoints (no `/demo/` segment); agent-portfolios are real accounts.
 
-## CRITICAL — freeze equity and cash at workflow start
-
-This is the strict, agent-portfolio-specific application of the general "Check current equity / cash before any trade workflow" rule in `etoro-trading-assistant`'s SKILL.md. It's **non-negotiable** because user intents are expressed as percentages and the only way to size them correctly is to anchor on a single, locked equity value.
-
-Before starting **any** workflow on an agent-portfolio (single trade, bulk build, rebalance, conditional rule, status report), call:
-
-```
-pnl = GET /trading/info/real/pnl   // x-user-key = the agent-portfolio's userToken
-```
-
-Then **freeze two anchors that don't change for the duration of the workflow**, per `etoro-trading-assistant`'s `references/bulk-trading.md` §2:
-
-```
-EQUITY_ANCHOR = equity(pnl)         // unit of user intent: "X%" means X% × EQUITY_ANCHOR
-CASH_ANCHOR   = available_cash(pnl) // execution constraint at workflow start
-```
-
-Use the formulas in `references/account-snapshot.md` to compute both. Use these for ALL sizing decisions in the workflow — the `Amount` field on every API call is `floor(pct × EQUITY_ANCHOR × 100) / 100`. These numbers are essential **internal context**; they are **never** disclosed to the user.
-
-**Why freeze.** Equity drifts with market movement on existing positions; cash is stable in single-actor mode. Re-computing `pct × current_equity` mid-flow makes the same percentage intent resolve to different dollar amounts depending on timing — and post-fill percentages slide too. Freezing makes percentages deterministic and verifiable.
-
-Don't reuse anchors from earlier in the conversation. Each new workflow gets its own fresh `/pnl` read and its own anchors.
-
-## CRITICAL — stated percentages are CEILINGS
-
-Every percentage in the user's intent is an **upper bound**, not a target. The actual filled allocation must be ≤ the stated figure. **Always under-fill rather than over-fill** — a small under-allocation is invisible and recoverable; an over-allocation requires an unwinding partial close, surprises the user, and may incur fees on the corrective trade.
-
-Mechanics (full version in `etoro-trading-assistant`'s `references/bulk-trading.md` §4 "Sizing — stated allocations are CEILINGS"):
-
-1. **Floor when converting**: `amount_usd = floor(pct × EQUITY_ANCHOR × 100) / 100`. Never round up; never round to "nice numbers" like $300 when math gives $295.40.
-2. **Cumulative check** before each send: `spent_so_far + next_amount ≤ Σ planned_amounts ≤ CASH_ANCHOR`. If violated, abort and recompute — do not silently shrink-and-fire.
-3. **Verify against `EQUITY_ANCHOR`** after fill, NOT against current equity. `position.amount > floor(stated_pct × EQUITY_ANCHOR × 100) / 100` indicates an agent-side bug — surface it and offer a corrective partial close.
-
-The mirror-image rule for **closes** (when freeing cash via the rebalancing flow) is: round UP, not down — see `references/rebalancing.md` §A "Insufficient-cash variant" for the 1%-of-shortfall buffer that prevents under-closing.
-
-## CRITICAL — user-facing numbers rule (the override)
+## Override A — user-facing numbers are percentages of equity, never dollars
 
 **Never show the user absolute dollar amounts** from the agent-portfolio's equity or position sizes. Always translate to **percentages of equity** in user-facing output:
 
@@ -79,91 +38,36 @@ The mirror-image rule for **closes** (when freeing cash via the rebalancing flow
 | "75% cash" | "$7,500 cash" |
 | "Invest 2.5% in AAPL" | "Invest $250 in AAPL" |
 
-This rule **overrides the regular-account dollar default** in every workflow loaded from `etoro-trading-assistant`. The override applies to:
+This rule **overrides the regular-account dollar default** in every workflow loaded from `etoro-trading-assistant`. Applies to:
 
 - `single-trade-walkthrough.md` — replace dollars with percentages in user-facing intent confirmations, error messages, and outcome reports.
 - `bulk-trading.md` — use percentages in plan confirmations and post-execution reports.
 - `rebalancing.md` — use percentages in diff confirmations and the trade-off communication for the insufficient-cash variant.
 - `conditional-rules.md` — express rule sizes, targets, and trigger notifications in percentages.
 
-Internal API calls still use dollar `Amount` fields — convert at the call site as `amount_usd = pct × equity`. The user never sees the dollar number.
+Internal API calls still use dollar `Amount` fields — convert at the call site as `amount_usd = pct × EQUITY_ANCHOR` (per the execution invariants — see Override B). The user never sees the dollar number.
 
-Each workflow reference has an "Account context" callout near the top reminding the agent of this override. When you load one of those references after this skill, **apply the override consistently**.
+The single exception is `investmentAmountInUsd` at portfolio creation — that's the user's *own real account* funds being committed, so it's named in dollars (see `references/onboarding.md` Step 2).
 
-## Step 1 — Collect a user key
+## Override B — always read live equity and cash before every workflow
 
-Ask the user for an **API user key** (`x-user-key`). Offer both options together, agent-portfolio key listed first (preferred):
+The general anchor-freeze rule in `etoro-trading-assistant/references/execution-invariants.md` §1 already says to read `/pnl` at workflow start and freeze `EQUITY_ANCHOR` + `CASH_ANCHOR`. **For agent-portfolios this is non-negotiable and specifically critical**, because user intents are expressed as percentages and the only way to size them correctly is to anchor on a live equity value — not a value remembered from earlier in the conversation, not the `agentPortfolioVirtualBalance` returned at creation, not anything else.
 
-1. **Agent-portfolio API key** (preferred) — created specifically for an existing agent-portfolio.
-2. **Main account API key** — created with **Environment: Real** and **Write Access** permission at <https://www.etoro.com/settings/trade>.
-
-The `x-api-key` header is the canonical eToro partner key from `etoro-trading-assistant`'s `references/api-conventions.md` — do not ask the user for it.
-
-### Detect the key type
-
-After receiving the key, call:
+Before starting **any** workflow on an agent-portfolio (single trade, bulk build, rebalance, conditional rule, status report):
 
 ```
-GET https://public-api.etoro.com/api/v1/agent-portfolios
+pnl = GET /trading/info/real/pnl   // x-user-key = the agent-portfolio's userToken
+EQUITY_ANCHOR = equity(pnl)        // X% of intent → X% × EQUITY_ANCHOR
+CASH_ANCHOR   = available_cash(pnl)
 ```
 
-| Response | Key type | Next step |
-|---|---|---|
-| **200** | Main-account key with `real:write` | Step 2 — create a new portfolio |
-| **403 `Forbidden`** | Agent-portfolio key | Check portfolio state (below), then jump to operations (load `etoro-trading-assistant` workflows) |
-| **403 `InsufficientPermissions`** | Key without `real:write` | Ask the user for a key with the right scope |
+Use these for ALL sizing decisions in the workflow — `Amount = floor(pct × EQUITY_ANCHOR × 100) / 100` (per `execution-invariants.md` §2 ceilings). These numbers are **internal context only**; never disclosed to the user (see Override A).
 
-Skip Steps 2 and 3 silently when the key is already an agent-portfolio key — don't tell the user you're skipping steps.
+A new workflow gets fresh anchors. Don't reuse anchors from earlier in the conversation.
 
-### Check existing-portfolio state (agent-portfolio key only)
+## Operating an agent-portfolio (after onboarding)
 
-Call `GET /trading/info/real/pnl`. (For the response shape and aggregation formulas, see `etoro-trading-assistant`'s `references/account-snapshot.md`.)
-
-- **Empty** (no `positions[]` and no `ordersForOpen[]`): tell the user the portfolio is empty and ask if they'd like to build one. (For a build, load `etoro-trading-assistant`'s `references/bulk-trading.md` and apply the percentages override.)
-- **Active**: report the number of open positions and pending orders (in percentages of equity), then ask if they want to modify it.
-
-## Step 2 — Gather portfolio parameters (new portfolio only)
-
-| Parameter | Required | Notes |
-|---|---|---|
-| **Portfolio name** | Yes | 6–10 characters, unique. Maps to `agentPortfolioName`. |
-| **Investment amount** | Yes | USD; real funds drawn from the user's real account. Maps to `investmentAmountInUsd`. (This is one of the few places dollars appear in user-facing language — it's the user's *own real account* funds being committed, not the agent-portfolio's internal balance.) |
-
-Auto-generate (don't ask the user):
-
-- **`userTokenName`**: lowercase `agentPortfolioName` + `-key-` + 6 random digits, e.g. `portfoliox-key-482917`.
-- **`scopeIds`**: always `[202]` (real:write).
-
-## Step 3 — Create the agent-portfolio
-
-```
-POST https://public-api.etoro.com/api/v1/agent-portfolios
-```
-
-```json
-{
-  "investmentAmountInUsd": <amount>,
-  "agentPortfolioName": "<name>",
-  "userTokenName": "<auto-generated>",
-  "scopeIds": [202]
-}
-```
-
-On `201`, the response carries:
-
-- `agentPortfolioId`, `agentPortfolioName`, `agentPortfolioGcid`
-- `agentPortfolioVirtualBalance` — the agent-portfolio's starting equity (whatever value eToro sets; **don't show this to the user**, and don't depend on a specific value being returned)
-- `mirrorId`
-- `userTokens[0].userToken` — **the secret token, only available at creation time**
-- `userTokens[0].userTokenId`, `userTokens[0].clientId`
-
-**Critical:** present the `userToken` to the user immediately, labelled with the auto-generated `userTokenName`:
-
-> *"Here is your key **portfoliox-key-482917**. Store it securely — this is the only time it will be shown. If lost, you'll need to create a new key for this agent-portfolio."*
-
-## Operating an agent-portfolio (after creation)
-
-Once the agent-portfolio exists and you have its `userToken`, all trading flows live in `etoro-trading-assistant`:
+Once the agent-portfolio exists and you have its `userToken` (per `references/onboarding.md`), all trading flows live in `etoro-trading-assistant`:
 
 | User wants to | Load |
 |---|---|
@@ -176,17 +80,10 @@ Once the agent-portfolio exists and you have its `userToken`, all trading flows 
 For all of the above:
 
 - Use the agent-portfolio's `userToken` as `x-user-key`.
-- **Always read current equity/cash from `/pnl` first** before any sizing or execution (see the always-check-equity-first rule above). Don't assume the agent-portfolio's equity equals what it started with at creation.
-- Apply the **user-facing-numbers rule** (percentages of equity, not dollars) per the override note in each reference.
+- Apply Override A (percentages, never dollars) to user-facing output.
+- Apply Override B (always read live equity/cash from `/pnl` first) — this is the agent-portfolio-specific application of the anchor-freeze invariant.
+- Apply all other invariants from `execution-invariants.md` (ceilings on allocations, at-most-once delivery, never-hallucinate-on-401) unchanged.
 - Approval-mode handling is the same as for regular accounts — default to "ask before each trade" unless the user opts into auto-execute (e.g. for recurring rebalancing).
-
-## Retrieving existing agent-portfolios
-
-```
-GET https://public-api.etoro.com/api/v1/agent-portfolios
-```
-
-Returns `agentPortfolios[]`, each with `agentPortfolioId`, `agentPortfolioName`, `agentPortfolioGcid`, `agentPortfolioVirtualBalance`, `mirrorId`, `createdAt`, and `userTokens[]` (without the secret `userToken` value — that's only returned at creation time).
 
 ## Presenting the agent-portfolio to the user
 
@@ -205,47 +102,24 @@ Your agent-portfolio:
 
 | Concept | Detail |
 |---|---|
-| Agent-portfolio equity | The agent-portfolio's own funds, varies over time as positions move. Read live from `/pnl` at the start of every workflow — never assume a fixed value. **Hidden from the user**; used only as internal context for sizing. |
-| `investmentAmountInUsd` | Real money deducted from the *user's real account* to copy-trade this portfolio. The one place where a dollar amount appears in user-facing language (it's the user's own real funds being committed at creation). |
+| Agent-portfolio equity | The agent-portfolio's own funds, varies over time as positions move. Read live from `/pnl` at the start of every workflow per Override B. **Hidden from the user** per Override A; used only as internal context for sizing. |
+| `investmentAmountInUsd` | Real money deducted from the *user's real account* to copy-trade this portfolio. The one place where a dollar amount appears in user-facing language — it's the user's own real funds being committed at creation. |
 | Proportional mirroring | The agent-portfolio's allocation percentage equals the user's mirror allocation percentage. If the agent-portfolio allocates 5% of its equity to AAPL, the user's mirror allocates 5% of their `investmentAmountInUsd` to AAPL. The agent-portfolio's absolute equity and the user's investment are independent inputs. |
-| User token | Secret created once at portfolio creation. User must store it themselves. |
+| User token | Secret created once at portfolio creation. User must store it themselves (see `references/onboarding.md` Step 3). |
 | `scopeIds` | `202` = real:write (default and required for trading). |
 
-## Error handling (creation-specific)
+## Reference pages in this skill
 
-| Code | Meaning | Action |
-|---|---|---|
-| 400 | Validation failed (name length, investment minimum) | Show the error; ask the user to correct input. |
-| 401 | Unauthorized | Verify both keys and required scopes. See `etoro-trading-assistant`'s `references/sso-and-session.md` for full handling. |
-| 207 | Portfolio created but user-token issuance failed | Portfolio exists but needs a new token — inform the user. |
-| 500 | Server error | Retry once, then surface to the user. |
+- `references/onboarding.md` — the conversational onboarding flow (Steps 1–3: collect key, detect type, create portfolio + secret-token handoff), plus retrieval of existing agent-portfolios, creation-error handling, and `userToken`-revoked recovery.
 
-For trade-execution errors (429 rate limit, 401 mid-session, etc.), see the relevant workflow reference in `etoro-trading-assistant`.
-
-## When the `userToken` stops working (401)
-
-If a Public API call using an agent-portfolio's `userToken` returns 401 Unauthorized, the `userToken` has been revoked or invalidated — same behavior as a regular-account user-key being revoked. There is **no refresh** for an agent-portfolio `userToken`.
-
-Recovery:
-
-1. **Stop the current workflow immediately.** Don't keep firing requests against the dead token; never report a workflow as completed when it failed mid-way.
-2. Tell the user the `userToken` is no longer valid and ask them to:
-   - Confirm whether they intentionally revoked the agent-portfolio's key.
-   - **If the agent-portfolio still exists** but the `userToken` is lost: they may need to create a new agent-portfolio (the original `userToken` was the only one, returned at creation time only — it cannot be re-issued for the same agent-portfolio).
-   - **If the user wants to keep operating** the same allocation strategy, they would need to re-create a new agent-portfolio and re-run the build flow.
-
-See `etoro-trading-assistant`'s `references/sso-and-session.md` §§3–4 for the full 401 handling pattern, including the don't-hallucinate-trades rule.
+For everything else (workflows, invariants, foundational API knowledge), see `etoro-trading-assistant`.
 
 ## Sanity checks
 
-- [ ] Every user-facing number is a percentage of equity, never a dollar amount from the agent-portfolio's equity or position sizes.
-- [ ] Before each workflow, `/pnl` is read fresh and `EQUITY_ANCHOR` + `CASH_ANCHOR` are FROZEN for the workflow's duration. Anchors are never recomputed mid-workflow; sizing always references them, not current equity.
-- [ ] **Stated percentages are CEILINGS**: `amount_usd = floor(pct × EQUITY_ANCHOR × 100) / 100` — floored, never rounded up. Over-fills are surfaced and corrected via partial close (per `references/bulk-trading.md` §5).
-- [ ] **Closes round UP** (rebalancing.md insufficient-cash variant): close at least `shortfall + 1% of shortfall` to avoid landing short and triggering a corrective second round.
-- [ ] User-facing percentages are computed against `EQUITY_ANCHOR`, not current equity — so the same intent resolves to the same number regardless of when the user looks.
+- [ ] **Override A — percentages, never dollars** — every user-facing number is a percentage of equity, not a dollar amount from the agent-portfolio's equity or position sizes.
+- [ ] **Override B — live `/pnl` read before every workflow** — `EQUITY_ANCHOR` + `CASH_ANCHOR` frozen from a fresh `/pnl` (not from the conversation, not from `agentPortfolioVirtualBalance`, not from a previous workflow).
+- [ ] All other invariants from `execution-invariants.md` apply unchanged (ceilings on opens, mirror-image rule for closes when freeing cash, at-most-once on every POST, stop on 401).
 - [ ] The hardcoded `x-api-key` (per `api-conventions.md`) is used; the user is never asked for it.
-- [ ] `userToken` is presented to the user exactly once at portfolio creation, with explicit storage instructions.
-- [ ] After creation, all execution flows are loaded from `etoro-trading-assistant` (single trade, bulk, rebalance, conditional rules) — not handled inline here.
-- [ ] The percentages-of-equity override is applied to every output from those flows.
+- [ ] `userToken` is presented to the user exactly once at portfolio creation, with explicit storage instructions (`references/onboarding.md` Step 3).
+- [ ] After creation, all execution flows are loaded from `etoro-trading-assistant` — not handled inline here.
 - [ ] No specific dollar amount (e.g. "$10,000") is mentioned to the user as the agent-portfolio's balance or starting capital — the value comes from `/pnl` and is operational only.
-- [ ] On 401 against the agent-portfolio's `userToken`, all workflows stop immediately; the user is informed clearly that the token is revoked; trades that didn't execute are not reported as if they did.

@@ -8,9 +8,9 @@ The skills are plain markdown with `SKILL.md` entry points and supporting `refer
 
 ## Skills included
 
-- **`etoro-trading-assistant`** — the foundational runtime skill for any agent talking to the eToro Public API. Covers identity, behavioral norms, and **all execution workflows** (single trade, bulk portfolio build, rebalancing, conditional/triggered rules) plus the foundational eToro API knowledge (request conventions, account-snapshot formulas, ID resolution, session handling). Each major topic has a reference page in `references/`.
+- **`etoro-trading-assistant`** — the foundational runtime skill for any agent talking to the eToro Public API. Covers identity, behavioral norms, and **all execution workflows** (single trade, bulk portfolio build, rebalancing, conditional/triggered rules) plus the foundational eToro API knowledge (request conventions, account-snapshot formulas, ID resolution, session handling). Includes `references/execution-invariants.md` — the four cross-cutting rules (anchor freeze, ceilings on allocations, at-most-once delivery, never-hallucinate-on-401) that every workflow applies — and `references/examples.md` with end-to-end conversation walkthroughs.
 
-- **`etoro-agent-portfolios`** — narrow skill for the eToro **agent-portfolios product** (dedicated copy-traded accounts that mirror the user's real account proportionally). Covers only what's *different* about agent-portfolios: the product concept, the conversational onboarding flow (key collection, portfolio creation), and the **user-facing-numbers override** (percentages of equity, never dollars). **Always loaded alongside `etoro-trading-assistant`** — agent-portfolio trade execution uses the workflow references in that skill, with this skill's percentages-of-equity rule applied to user-facing output.
+- **`etoro-agent-portfolios`** — narrow skill for the eToro **agent-portfolios product** (dedicated copy-traded accounts that mirror the user's real account proportionally). Covers only what's *different* about agent-portfolios: the product concept, the conversational onboarding flow (in `references/onboarding.md`), and two execution overrides — **Override A** (user-facing numbers are percentages of equity, never dollars) and **Override B** (always read live equity and cash from `/pnl` before every workflow). **Always loaded alongside `etoro-trading-assistant`** — agent-portfolio trade execution uses the workflow references in that skill, with these overrides applied throughout.
 
 ## How to use
 
@@ -47,6 +47,7 @@ external-agent-skills/
     ├── etoro-trading-assistant/
     │   ├── SKILL.md
     │   └── references/
+    │       ├── execution-invariants.md      (anchor freeze, ceilings, at-most-once, never-hallucinate-on-401)
     │       ├── api-conventions.md           (hosts, headers, casing, rate limits, response shape, trade defaults)
     │       ├── account-snapshot.md          (PnL endpoint formulas + per-field interpretation)
     │       ├── id-resolution.md             (symbol → instrumentID, conversation-scoped caching)
@@ -54,9 +55,12 @@ external-agent-skills/
     │       ├── single-trade-walkthrough.md  (end-to-end single trade)
     │       ├── bulk-trading.md              (multi-position build)
     │       ├── rebalancing.md               (current → target with phase orchestration)
-    │       └── conditional-rules.md         (triggered/rule-based trading)
+    │       ├── conditional-rules.md         (triggered/rule-based trading)
+    │       └── examples.md                  (worked end-to-end conversation walkthroughs)
     └── etoro-agent-portfolios/
-        └── SKILL.md                         (concept + onboarding + percentages override + cross-refs)
+        ├── SKILL.md                         (concept + Override A + Override B + cross-refs)
+        └── references/
+            └── onboarding.md                (key collection, portfolio creation, secret-token handoff)
 ```
 
-The `etoro-agent-portfolios` skill has no `references/` of its own — its workflow content lives entirely under `etoro-trading-assistant/references/`, with the percentages-of-equity rule applied as an override.
+The `etoro-agent-portfolios` skill carries only the concept, the two overrides, and the onboarding flow — every trade-execution workflow is loaded from `etoro-trading-assistant/references/`, with the overrides applied to user-facing output and live `/pnl` reads.
