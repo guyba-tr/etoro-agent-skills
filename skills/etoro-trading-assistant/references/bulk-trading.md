@@ -74,11 +74,27 @@ Use the formulas in `account-snapshot.md` §1 to compute both. **Neither value i
 
 ### Sufficiency check
 
-`total_planned = Σ(amount_usd)` where each `amount_usd = floor(pct × EQUITY_ANCHOR × 100) / 100` (see §4 Sizing). If `total_planned > CASH_ANCHOR`:
+`total_planned = Σ(amount_usd)` where each `amount_usd = floor(pct × EQUITY_ANCHOR × 100) / 100` (see §4 Sizing). If `total_planned > CASH_ANCHOR`, **stop — do not start executing, and do not silently switch to a rebalance flow.** Present the gap and let the user choose explicitly. Two situations:
 
-- **Initial build on a regular account**: tell the user the gap in dollars (e.g. *"You're trying to deploy $8,000 but only $5,000 is available."*) and ask them to revise.
-- **Initial build on an agent-portfolio**: same constraint, expressed in percentages per the agent-portfolios override.
-- **A new trade hitting cash shortfall on an existing portfolio**: that's a rebalance trigger — load `rebalancing.md` and use the "Insufficient-cash variant" (it spells out the close-with-buffer mechanic to free the missing cash without forcing a second rebalance round).
+- **Initial build (regular account or agent-portfolio)**: there are no existing positions to close, so the only meaningful response is *"shrink the plan."* Tell the user the gap (in dollars on regular accounts, in percentages on agent-portfolios per the override) and ask them to revise.
+
+- **New trade(s) on an existing portfolio with insufficient cash**: closing existing positions to fund the new trade IS an option, but it requires **explicit user consent** — closes are destructive actions, and the foundational norm in `etoro-trading-assistant`'s SKILL.md is *"Any open / close / cancel / modify requires explicit user confirmation"*. **Don't assume the user wants to liquidate existing exposure to fund the new request.** Present both options and let them pick:
+
+  ```
+  You asked me to open positions totalling $8,000, but only $5,000 is available.
+  Two options:
+
+    1. Shrink the plan to fit $5,000 — tell me which positions to drop or reduce.
+    2. Free up the missing $3,000 by closing or reducing some of your existing
+       positions. I'll propose which positions to reduce and confirm with you
+       before any closes happen.
+
+  Which would you like?
+  ```
+
+  **Only if the user picks option 2** (or if their original request already included an explicit close-to-fund instruction, e.g. *"buy $8,000 of these and close MSFT to cover it"*) do you load `rebalancing.md` and run the "Insufficient-cash variant" — and even then, the close plan is shown for confirmation before Phase 1 begins.
+
+  In agent-portfolio context, frame both options in percentages instead of dollars.
 
 ---
 
@@ -97,8 +113,6 @@ I'm about to open 8 positions on your real account:
 - TSLA:     $700
 - (cash):   $500
 Total: $10,000
-
-Estimated execution time: ~25 seconds (rate-limit pacing).
 
 Proceed?
 ```
@@ -137,14 +151,14 @@ Every percentage and dollar amount the user agreed to is an **upper bound**. The
 **Three rules together guarantee the ceiling:**
 
 1. **Floor when converting percentage → dollars.** Anchor on `EQUITY_ANCHOR` from §2 (NOT current equity). Floor to cents — never round to a "nice number" like $300 when the math gives $295.40.
-   ```
+  ```
    amount_usd = floor(pct × EQUITY_ANCHOR × 100) / 100
-   ```
+  ```
 2. **Cumulative check before each send.** Maintain `spent_so_far`. Before firing trade `i`, verify:
-   ```
+  ```
    spent_so_far + amount_usd[i] ≤ Σ planned amount_usd  (= total_planned from §2)
    spent_so_far + amount_usd[i] ≤ CASH_ANCHOR
-   ```
+  ```
    If either constraint would be violated, that's an arithmetic bug in the planner — abort the batch and recompute, do **not** silently shrink-and-fire (the user agreed to a specific plan).
 3. **Send the floored dollar amount.** Since eToro has no amount-slippage (`Amount: $X → position.amount = $X` exactly), the floored amount IS the exact filled value. The percentage of `EQUITY_ANCHOR` lands at or just under the stated cap.
 
@@ -158,16 +172,18 @@ For **dollar-form plans** the same discipline applies in mirror image — the us
 
 ### Response classification — at-most-once delivery
 
-**Trade-execution POSTs are not idempotent.** The eToro API has no idempotency key on `/market-open-orders/*` or `/market-close-orders/*`, so resending the same request after an ambiguous outcome can — and does — produce duplicate positions. Treat every trade request with the **at-most-once** discipline:
+**Trade-execution POSTs are not idempotent.** The eToro API has no idempotency key on `/market-open-orders/`* or `/market-close-orders/*`, so resending the same request after an ambiguous outcome can — and does — produce duplicate positions. Treat every trade request with the **at-most-once** discipline:
 
-| Outcome | Meaning | Action |
-|---|---|---|
-| **HTTP 200 / 201** with a body containing an `orderId` (or equivalent) | Server accepted and recorded the order | **Done. Don't resend. Move on.** |
-| **HTTP 4xx** (except 429) — `400`, `403`, `404`, etc. | Server rejected the request explicitly; nothing was placed | Log as failed; safe to surface to the user; **do not retry the same payload** (a 400 won't become a 200) |
-| **HTTP 401** | Credentials invalid | **STOP the entire batch.** See "Per-trade failure handling" below. |
-| **HTTP 429** | Rate-limited; server explicitly told you it didn't process | Safe to retry (the only safe retry case) — see "429 backoff" below |
-| **HTTP 5xx** with a body | Server processed and failed | Log as failed; **do not retry** — you don't know whether the order was placed before the failure |
-| **Timeout / connection reset / no response / parse error** | Truly ambiguous — the order may or may not have been placed | **Do not retry.** Mark the trade as ambiguous, continue the batch, and let §5 verification reconcile it via `/pnl` |
+
+| Outcome                                                                | Meaning                                                     | Action                                                                                                             |
+| ---------------------------------------------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| **HTTP 200 / 201** with a body containing an `orderId` (or equivalent) | Server accepted and recorded the order                      | **Done. Don't resend. Move on.**                                                                                   |
+| **HTTP 4xx** (except 429) — `400`, `403`, `404`, etc.                  | Server rejected the request explicitly; nothing was placed  | Log as failed; safe to surface to the user; **do not retry the same payload** (a 400 won't become a 200)           |
+| **HTTP 401**                                                           | Credentials invalid                                         | **STOP the entire batch.** See "Per-trade failure handling" below.                                                 |
+| **HTTP 429**                                                           | Rate-limited; server explicitly told you it didn't process  | Safe to retry (the only safe retry case) — see "429 backoff" below                                                 |
+| **HTTP 5xx** with a body                                               | Server processed and failed                                 | Log as failed; **do not retry** — you don't know whether the order was placed before the failure                   |
+| **Timeout / connection reset / no response / parse error**             | Truly ambiguous — the order may or may not have been placed | **Do not retry.** Mark the trade as ambiguous, continue the batch, and let §5 verification reconcile it via `/pnl` |
+
 
 **Why "do not retry" on ambiguous and 5xx outcomes:** the request might have reached the server, executed, and the response was lost on the way back. A retry in that case opens a duplicate position — the exact failure mode users hit. A missing position is recoverable (verify, then place it again deliberately); a duplicate is messy to unwind.
 
@@ -244,11 +260,13 @@ GET /trading/info/{env}/pnl
 
 Compare against the plan:
 
-| State | Where it lives in `clientPortfolio` | Meaning | Tell the user |
-|---|---|---|---|
-| **Filled** | `positions[]` (find matching `instrumentID`) | Order executed; user has a real position | "Position opened" |
-| **Pending market open** | `ordersForOpen[]` (matching `instrumentID`) | Order accepted but markets are closed (e.g. stocks on weekend or out-of-hours) | "Pending — will fill when market opens" |
-| **Failed / unknown** | Neither array | API error, validation failure, or order silently dropped | "Failed — please re-review" |
+
+| State                   | Where it lives in `clientPortfolio`          | Meaning                                                                        | Tell the user                           |
+| ----------------------- | -------------------------------------------- | ------------------------------------------------------------------------------ | --------------------------------------- |
+| **Filled**              | `positions[]` (find matching `instrumentID`) | Order executed; user has a real position                                       | "Position opened"                       |
+| **Pending market open** | `ordersForOpen[]` (matching `instrumentID`)  | Order accepted but markets are closed (e.g. stocks on weekend or out-of-hours) | "Pending — will fill when market opens" |
+| **Failed / unknown**    | Neither array                                | API error, validation failure, or order silently dropped                       | "Failed — please re-review"             |
+
 
 ### Reconciling ambiguous trades
 
@@ -315,16 +333,17 @@ If anything failed, surface the failures explicitly with the error reason and su
 
 ## 6. Sanity checks
 
-- [ ] Plan input validated: dollar form OR percentage form, not mixed.
-- [ ] **`EQUITY_ANCHOR` and `CASH_ANCHOR` frozen at workflow start** (§2) and used for ALL sizing, sufficiency, and verification — never recomputed mid-flow.
-- [ ] Sufficiency check passed: `Σ amount_usd ≤ CASH_ANCHOR` (and for percentages, also `Σ ≤ 100%`).
-- [ ] ≤ 20 instruments recommended (warn the user if more).
-- [ ] All `instrumentID`s resolved up front; partial-resolution plans rejected entirely.
-- [ ] **Sizing — stated allocations are CEILINGS**: `amount_usd = floor(pct × EQUITY_ANCHOR × 100) / 100`; never round up; never round to "nice numbers"; cumulative `spent_so_far + next_amount ≤ total_planned` checked before each send.
-- [ ] Trade-execution requests spaced ≥3s; 429 handled with 15s → 30s → 60s backoff; per-trade limit of 3 retries.
-- [ ] **At-most-once delivery enforced**: only 429 triggers a same-payload retry. 4xx (except 429), 5xx, and ambiguous outcomes (timeout / connection drop / no response) are never retried — they're reconciled at verification time via `/pnl`. This is the duplicate-position prevention rule.
-- [ ] **On 401: stop the entire batch immediately, report which trades succeeded before the failure, ask for a new credential.** Never report the batch as "complete" when it isn't.
-- [ ] Other per-trade failures (400, 5xx) are logged and reported but don't abort the batch and are never retried.
-- [ ] Post-execution: 60s wait, then `/pnl` re-read; results categorized as filled / pending / failed / ambiguous-but-missing against the plan; ambiguous trades resolved by checking `positions[]`/`ordersForOpen[]`, never by re-firing.
-- [ ] **Over-allocation check** (§5): for each filled position, `actual_amount ≤ floor(stated_pct × EQUITY_ANCHOR × 100) / 100`. Any over-fill is flagged and a corrective partial close is offered. Allocation is verified against `EQUITY_ANCHOR`, NOT current/post-execution equity.
-- [ ] User-facing report uses **the same unit the user gave you** (dollars on regular accounts; percentages in agent-portfolio context); pending-market-open distinction explicitly surfaced; percentages reported are computed against `EQUITY_ANCHOR`, not current equity.
+- Plan input validated: dollar form OR percentage form, not mixed.
+- `**EQUITY_ANCHOR` and `CASH_ANCHOR` frozen at workflow start** (§2) and used for ALL sizing, sufficiency, and verification — never recomputed mid-flow.
+- Sufficiency check passed: `Σ amount_usd ≤ CASH_ANCHOR` (and for percentages, also `Σ ≤ 100%`).
+- ≤ 20 instruments recommended (warn the user if more).
+- All `instrumentID`s resolved up front; partial-resolution plans rejected entirely.
+- **Sizing — stated allocations are CEILINGS**: `amount_usd = floor(pct × EQUITY_ANCHOR × 100) / 100`; never round up; never round to "nice numbers"; cumulative `spent_so_far + next_amount ≤ total_planned` checked before each send.
+- Trade-execution requests spaced ≥3s; 429 handled with 15s → 30s → 60s backoff; per-trade limit of 3 retries.
+- **At-most-once delivery enforced**: only 429 triggers a same-payload retry. 4xx (except 429), 5xx, and ambiguous outcomes (timeout / connection drop / no response) are never retried — they're reconciled at verification time via `/pnl`. This is the duplicate-position prevention rule.
+- **On 401: stop the entire batch immediately, report which trades succeeded before the failure, ask for a new credential.** Never report the batch as "complete" when it isn't.
+- Other per-trade failures (400, 5xx) are logged and reported but don't abort the batch and are never retried.
+- Post-execution: 60s wait, then `/pnl` re-read; results categorized as filled / pending / failed / ambiguous-but-missing against the plan; ambiguous trades resolved by checking `positions[]`/`ordersForOpen[]`, never by re-firing.
+- **Over-allocation check** (§5): for each filled position, `actual_amount ≤ floor(stated_pct × EQUITY_ANCHOR × 100) / 100`. Any over-fill is flagged and a corrective partial close is offered. Allocation is verified against `EQUITY_ANCHOR`, NOT current/post-execution equity.
+- User-facing report uses **the same unit the user gave you** (dollars on regular accounts; percentages in agent-portfolio context); pending-market-open distinction explicitly surfaced; percentages reported are computed against `EQUITY_ANCHOR`, not current equity.
+

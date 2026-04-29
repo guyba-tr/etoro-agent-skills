@@ -75,7 +75,21 @@ GET /trading/info/{env}/pnl
 Compute Available Cash via the formula in `account-snapshot.md` §1.
 
 - If `requested_amount ≤ available_cash` → proceed.
-- If `requested_amount > available_cash` → **stop and tell the user**, in absolute dollar amounts (e.g. *"You're trying to deploy $8,000 but only $5,000 is available."*). Don't auto-close other positions unless they explicitly ask. If they do ask to free cash, that's a rebalance trigger — load `etoro-agent-portfolios/references/rebalancing.md` "Insufficient-cash variant" for the structured close-then-cache-wait-then-open flow.
+- If `requested_amount > available_cash` → **stop, present the gap, and ask the user explicitly** what to do. Don't auto-close other positions to fund the trade — closes are destructive actions and require explicit consent (per `etoro-trading-assistant/SKILL.md` "Confirm before destructive actions"). Offer two options:
+
+  ```
+  You're trying to deploy $8,000 of AAPL but only $5,000 is available.
+  Two options:
+
+    1. Reduce the trade size to fit $5,000.
+    2. Free up the missing $3,000 by closing or reducing some of your existing
+       positions. I'll propose which positions to reduce and confirm with you
+       before any closes happen.
+
+  Which would you like?
+  ```
+
+  **Only if the user picks option 2** (or had already given a close-to-fund instruction up front, e.g. *"buy $8,000 of AAPL, close MSFT to cover it"*) load `rebalancing.md` "Insufficient-cash variant" for the structured close-then-cache-wait-then-open flow. In agent-portfolio context, frame both options in percentages.
 
 For a **close**, no cash pre-flight is needed — the position already exists.
 

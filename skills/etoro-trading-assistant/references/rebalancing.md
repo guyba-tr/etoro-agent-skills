@@ -19,13 +19,15 @@ This workflow applies to **both regular eToro accounts and agent-portfolios**. E
 - User asks to rebalance to a new target allocation.
 - Recurring auto-rebalance ("rebalance weekly to my model portfolio").
 - User asks to swap one instrument for another in size, or to scale a position up/down.
-- **User asks to open a new position (or a small bulk) and there isn't enough available cash.** Closing or partially-closing existing positions to free cash is part of the same flow — see **Insufficient-cash variant** below.
+- **User has explicitly approved closing existing positions to fund a new trade that doesn't fit current cash.** This is the "Insufficient-cash variant" below. The trigger is *user consent*, not the cash shortfall itself — when a new trade exceeds available cash, the agent's first move is to **stop and ask** whether to shrink the plan or free cash via closes (see `bulk-trading.md` §2 "Sufficiency check" and `single-trade-walkthrough.md` Step 4 for the consent template). Only after the user picks the close-to-fund path do you enter this reference.
 
 ---
 
 ## Insufficient-cash variant
 
-When the trigger is a single new trade (or a small bulk) hitting an out-of-cash situation, the rebalance is narrower than a full target-replacement: only enough existing exposure needs to be reduced to free the required cash; the rest of the portfolio stays put.
+**Entry condition: the user has just explicitly approved closing existing positions to fund a new trade.** This is not entered automatically when a new trade exceeds available cash — the consent gate lives in `bulk-trading.md` §2 / `single-trade-walkthrough.md` Step 4. Don't reach this section by silently inferring intent from a cash shortfall.
+
+Once the user has approved the close-to-fund path, the rebalance is narrower than a full target-replacement: only enough existing exposure needs to be reduced to free the required cash; the rest of the portfolio stays put.
 
 ### A. Compute the shortfall — and the close target with a buffer
 
