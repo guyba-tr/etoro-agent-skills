@@ -1,6 +1,6 @@
 # Worked Examples
 
-Reference for the `etoro-trading-assistant` skill. Four end-to-end conversation walkthroughs that show the rules from `execution-invariants.md` and the workflow references applied in practice — the tone, the pacing of confirmations, the order of steps, and what the user actually sees.
+Reference for the `etoro-trading-assistant` skill. Five end-to-end conversation walkthroughs that show the rules from `execution-invariants.md` and the workflow references applied in practice — the tone, the pacing of confirmations, the order of steps, and what the user actually sees.
 
 These are illustrative, not normative. Where they conflict with a workflow reference, the reference wins.
 
@@ -121,7 +121,7 @@ ASSISTANT: I'll open 7 positions on your agent-portfolio:
   - SOL:     5%
   - (cash):  5%
 
-Total allocated: 95%. Estimated time ~85 seconds (~25 s of 3s-paced execution + 60 s wait for the PnL cache to refresh before verification).
+Total allocated: 95%. Estimated time about 90 seconds.
 
 Proceed?
 
@@ -263,17 +263,19 @@ Why each line is wrong:
 
 ```
 ASSISTANT: I'll close all 10 of your open positions. Estimated time
-~90 seconds (~30s of paced execution + 60s wait for the PnL cache to
-refresh before verification). Proceed?
+about 90 seconds. Proceed?
 
 USER: yes
 
 [~90 seconds of silence — agent executes, recovers from any payload
- or path issues silently, retries 429s silently, waits 60s, verifies]
+ or path issues silently, retries 429s silently, waits the cache out
+ silently, verifies silently]
 
 ASSISTANT: Done — all 10 positions closed. Your portfolio is now 100%
 cash.
 ```
+
+Note the time estimate is **one customer-friendly number** ("about 90 seconds"). It is **not** broken down into "~30s of paced execution + 60s wait for the PnL cache" or any other mechanism explanation. The breakdown exists in the agent's planner; it does not exist in the user-facing message.
 
 Two messages, total. One sets expectations and asks for consent. One delivers the verified bottom line.
 
@@ -297,3 +299,92 @@ The "stay silent" rule has three legitimate exceptions, all called out in `etoro
 3. **Partial outcome the user needs to know about.** If 9 of 10 closed and NVDA failed for a non-recoverable reason, the bottom line includes the failure: *"Closed 9 of 10. NVDA failed (insufficient permissions on this instrument). Want me to skip it or escalate?"* — *not* *"Let me retry NVDA"* (which is internal).
 
 In all other cases — payload fixes, endpoint-path discovery, 429 backoffs, ambiguous-outcome reconciliation — the user sees nothing until the verified bottom line.
+
+---
+
+## Example 5 — Rebalance on an agent-portfolio (silence + Override A enforcement)
+
+**Scenario:** the user has 5 existing positions on an agent-portfolio and asks to add XRP. The agent proposes a rebalance plan (scale all 5 down proportionally to free room for a new XRP position). This is a **multi-step workflow** taking ~2½ minutes (closes → cache wait → opens → cache wait → verify), which is the longest workflow in the system. The temptation to "keep the user updated" mid-flow is highest here — and that's exactly when the agent must resist hardest.
+
+This example also enforces **Override A** (agent-portfolio dollar amounts are NEVER customer-facing). Mid-workflow status pings on agent-portfolios commonly leak dollars (*"Cash freed: $2,012.97"*) — which is **two violations stacked**: a status ping that shouldn't exist at all, in dollars on an account where dollars shouldn't be shown.
+
+```
+USER: Add XRP to my portfolio at 20%.
+```
+
+### ❌ Bad version — what the agent should NOT send
+
+This is what real conversations have looked like. Every line either narrates mechanics or leaks dollars.
+
+```
+ASSISTANT: Here's how I'd redistribute, scaling the existing 5 down
+proportionally to make room:
+
+Target allocation:
+  • BTC:  28% (was 35%)
+  • ETH:  20% (was 25%)
+  • XRP:  20% (new)
+  • SOL:  12% (was 15%)
+  • LINK:  8% (was 10%)
+  • ADA:   7% (was 10%)
+  • Cash:  5%
+
+That keeps the same relative ranking while carving out XRP's 20%.
+This will involve partial closes on all 5 existing positions, a 60-second
+wait for settlement, then opening XRP.
+
+Good to go, or want different weights?
+
+USER: yes
+
+A: Executing the rebalance. Phase 1: partial closes on all 5
+positions, then 60s wait, then open XRP.
+
+A: All 5 closes landed. Cash freed: $2,012.97. Now executing Phase 2:
+open XRP.
+
+A: All clear. XRP filled at the 20% target. Portfolio rebalanced.
+```
+
+What's wrong with each piece:
+
+- **The plan message** is mostly fine, but *"a 60-second wait for settlement, then opening XRP"* leaks the cache wait as a mechanism. Reword: *"The full sequence takes about 2½ minutes."* — one customer-friendly number, no mechanism.
+- **"Executing the rebalance. Phase 1: …"** — pure mechanism narration. The user said yes; no mid-flow status ping needed at all.
+- **"All 5 closes landed. Cash freed: $2,012.97. Now executing Phase 2: open XRP."** — three violations stacked: (1) mid-flow status ping that shouldn't exist, (2) "Phase 1 / Phase 2" workflow-step labels surfacing internal structure, (3) **dollar amount on an agent-portfolio**, which is a hard Override A violation.
+- **"All clear. XRP filled at the 20% target. Portfolio rebalanced."** — this is the only message the user actually needed, and it could be even tighter.
+
+### ✅ Good version — what the agent SHOULD send
+
+```
+ASSISTANT: Here's how I'd redistribute to make room for XRP at 20%
+(scaling the existing 5 down proportionally):
+
+  • BTC:  28% (was 35%)
+  • ETH:  20% (was 25%)
+  • XRP:  20% (new)
+  • SOL:  12% (was 15%)
+  • LINK:  8% (was 10%)
+  • ADA:   7% (was 10%)
+  • Cash:  5%
+
+Same relative ranking, carving out 20% for XRP. Estimated time about
+2½ minutes. Good to go, or want different weights?
+
+USER: yes
+
+[~2½ minutes of silence — agent runs Phase 1 closes, waits the cache,
+ runs Phase 2 opens, waits the cache, verifies — all silently. The
+ user gets nothing in this window.]
+
+A: Done. Your portfolio now matches the plan: BTC 28%, ETH 20%,
+XRP 20%, SOL 12%, LINK 8%, ADA 7%, ~5% cash.
+```
+
+Two messages, total. One asks for consent with a customer-friendly time estimate. One delivers the verified bottom line in **percentages** (Override A).
+
+### Notes
+
+- **Estimated time** in the confirmation is *"about 2½ minutes"*, not *"~25s of close pacing + 60s PnL-cache wait + ~10s of open pacing + 60s PnL-cache wait before final verification"* (the breakdown in `rebalancing.md` §4 exists for the agent's planner; it does not exist for the user).
+- **No "Phase 1 / Phase 2" labels** in user-facing messages — those are internal terminology from `rebalancing.md` §3. Customer-facing language: *"close some, open some"*, or just don't mention the structure at all (the user knows it's a rebalance because they asked for one).
+- **No dollar amounts** on agent-portfolios, ever. *"Cash freed: $2,012.97"* is a hard Override A violation. The internal `liveCash ≥ Σ planned_opens` check (`rebalancing.md` §6) uses dollars; the customer-facing report uses percentages. Translation happens at the call site, every time.
+- **The confirmation message can name the close-buffer reason in plain language** if the over-close is large enough to be noticeable — *"freeing about 3% of cash (a small extra so we don't land short)"* is fine. Saying *"plus a 0.03% safety buffer to avoid a corrective second close-then-wait round"* is not — that names the mechanism.

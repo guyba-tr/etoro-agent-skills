@@ -32,22 +32,26 @@ The agent trades on behalf of the agent-portfolio using **the agent-portfolio's 
 
 **Never show the user absolute dollar amounts** from the agent-portfolio's equity or position sizes. Always translate to **percentages of equity** in user-facing output:
 
-| Show this | NOT this |
+| ✅ Show this | ❌ NOT this |
 |---|---|
 | "+2.1%" | "+$34.70" |
 | "75% cash" | "$7,500 cash" |
 | "Invest 2.5% in AAPL" | "Invest $250 in AAPL" |
+| "Freeing about 3% of cash to make room" | "Cash freed: $2,012.97" |
+| "Position now at 28%" | "Position at $2,755" |
 
 This rule **overrides the main-account dollar default** in every workflow loaded from `etoro-trading-assistant`. Applies to:
 
 - `single-trade-walkthrough.md` — replace dollars with percentages in user-facing intent confirmations, error messages, and outcome reports.
 - `bulk-trading.md` — use percentages in plan confirmations and post-execution reports.
-- `rebalancing.md` — use percentages in diff confirmations and the trade-off communication for the insufficient-cash variant.
+- `rebalancing.md` — use percentages in diff confirmations, the trade-off communication for the insufficient-cash variant, **and any mid-flow status messages** (which per `etoro-trading-assistant/SKILL.md` "Talk in bottom lines, not mechanics" should mostly not exist anyway — but if one does, it must be in percentages).
 - `conditional-rules.md` — express rule sizes, targets, and trigger notifications in percentages.
 
 Internal API calls still use dollar `Amount` fields — convert at the call site as `amount_usd = pct × EQUITY_ANCHOR` (per the execution invariants — see Override B). The user never sees the dollar number.
 
-The single exception is `investmentAmountInUsd` at portfolio creation — that's the user's *own main-account* funds being committed, so it's named in dollars (see `references/onboarding.md` Step 2).
+**The single exception** is `investmentAmountInUsd` at portfolio creation — that's the user's *own main-account* funds being committed, so it's named in dollars (see `references/onboarding.md` Step 2). **There are no other exceptions.** If you find yourself wanting to surface a dollar amount mid-workflow ("cash freed", "deployed so far", "available headroom") — translate it to percentage of `EQUITY_ANCHOR` first. If a percentage doesn't make sense for what you're trying to communicate, you're probably about to violate the "Talk in bottom lines, not mechanics" rule too — don't send the message at all.
+
+**Treat dollar-leakage on agent-portfolios as the same severity as mechanics-leakage.** Both are hard rule violations. The screenshot example in `etoro-trading-assistant/references/examples.md` Example 5 ("Cash freed: $2,012.97") is what this looks like in practice and what you must never reproduce.
 
 ## Override B — always read live equity and cash before every workflow
 
@@ -116,9 +120,10 @@ For everything else (workflows, invariants, foundational API knowledge), see `et
 
 ## Sanity checks
 
-- [ ] **Override A — percentages, never dollars** — every user-facing number is a percentage of equity, not a dollar amount from the agent-portfolio's equity or position sizes.
+- [ ] **Override A — percentages, never dollars** — every user-facing number is a percentage of equity, not a dollar amount. Includes mid-flow status messages (*"Cash freed: $2,012.97"* — banned), pre-trade plan estimates (*"freeing about 3% of cash"* — fine), and post-trade reports (*"BTC now at 28%"* — fine; *"BTC at $2,755"* — banned).
+- [ ] **No mid-flow status pings** — between confirmation and the verified bottom-line result, the agent says nothing. No *"Now executing…"*, no *"Phase 1 done, starting Phase 2"*, no *"All 5 closes landed"*. Per `etoro-trading-assistant/SKILL.md` "Talk in bottom lines, not mechanics" and `references/examples.md` Example 5.
 - [ ] **Override B — live `/pnl` read before every workflow** — `EQUITY_ANCHOR` + `CASH_ANCHOR` frozen from a fresh `/pnl` (not from the conversation, not from `agentPortfolioVirtualBalance`, not from a previous workflow).
-- [ ] All other invariants from `execution-invariants.md` apply unchanged (ceilings on opens, mirror-image rule for closes when freeing cash, at-most-once on every POST, stop on 401).
+- [ ] All other invariants from `execution-invariants.md` apply unchanged (ceilings on opens, open buffer if planned cash < 1% of equity, mirror-image rule for closes when freeing cash, at-most-once on every POST, stop on 401).
 - [ ] The hardcoded `x-api-key` (per `api-conventions.md`) is used; the user is never asked for it.
 - [ ] `userToken` is presented to the user exactly once at portfolio creation, with explicit storage instructions (`references/onboarding.md` Step 3).
 - [ ] After creation, all execution flows are loaded from `etoro-trading-assistant` — not handled inline here.

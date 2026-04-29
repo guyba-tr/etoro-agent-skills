@@ -69,34 +69,33 @@ From here the flow is identical to a standard rebalance — reuse §§ 5–8 bel
 
 ### D. Communicate the trade-off to the user
 
-Be explicit that opening this trade costs them existing exposure. Mention the small over-close buffer so the user isn't surprised by a few extra dollars / basis points being freed. Main-account / dollar version:
+Be explicit that opening this trade costs them existing exposure. The over-close buffer can be alluded to in plain language ("a small extra to make sure we don't land short") but **never named as "buffer" with mechanics attached**. Main-account / dollar version:
 
 ```
-To open AAPL at $1,500, I need to free $300 of cash (plus a $3 safety buffer
-so we don't land short and have to rebalance again — total close target $303).
+To open AAPL at $1,500, I need to free about $303 of cash (a small extra
+beyond $300 so we don't land short).
 I'll partially close MSFT (currently worth $1,200, reducing to ~$897) to fund this.
 
-Net effect: AAPL +$1,500, MSFT −$303, available cash −$1,197.
-Estimated time: ~2½ minutes (the PnL endpoint caches for 60s, so we wait once
-between the close and the open and once more before the final verification).
+Net effect: AAPL +$1,500, MSFT −$303.
+Estimated time: about 2½ minutes.
 
 Proceed?
 ```
 
-Agent-portfolio context (percentages):
+Agent-portfolio context (percentages — Override A: dollars are NEVER customer-facing):
 
 ```
-To open AAPL at 5%, I need to free 3% of cash (plus a small safety buffer of
-~0.03% so we don't land short and have to rebalance again).
-I'll partially close MSFT (currently 12% → ~8.97%) to fund this.
+To open AAPL at 5%, I need to free about 3% of cash (a small extra beyond
+3% so we don't land short).
+I'll partially close MSFT (currently 12% → ~9%) to fund this.
 
-Net effect: AAPL +5%, MSFT −3.03%, available cash ~−1.97%.
-Estimated time: ~2½ minutes (two 60s waits for the PnL cache to refresh).
+Net effect: AAPL +5%, MSFT −3%.
+Estimated time: about 2½ minutes.
 
 Proceed?
 ```
 
-This avoids the surprise of "I asked to open AAPL, why did MSFT shrink?" — the user always sees the cause-and-effect before confirming, including the small extra freed by the buffer.
+This avoids the surprise of "I asked to open AAPL, why did MSFT shrink?" — the user always sees the cause-and-effect before confirming. **The estimated time is one customer-friendly number; never broken down into "two 60s cache waits", "Phase 1 / Phase 2", or any other mechanism explanation** (per `etoro-trading-assistant/SKILL.md` "Talk in bottom lines, not mechanics").
 
 ---
 
@@ -221,9 +220,28 @@ Opening / increasing:
 - TSLA:  $0    → $1,500    (new position)
 - NVDA: $1,000 → $2,000    (additional order)
 
-Estimated time: ~155 seconds
-  (~25s of close pacing + 60s PnL-cache wait + ~10s of open pacing
-   + 60s PnL-cache wait before final verification).
+Estimated time: about 2½ minutes.
+
+Proceed?
+```
+
+The estimated time is **one customer-friendly number**. **Never** break it down for the user as "~25s of close pacing + 60s PnL-cache wait + ~10s of open pacing + 60s wait before final verification" or similar — that's mechanism-narration, banned per `etoro-trading-assistant/SKILL.md` "Talk in bottom lines, not mechanics". The internal planner uses the breakdown to compute the ~2½-minute total; the user only sees the total.
+
+For agent-portfolio context, swap dollars for percentages of equity (Override A):
+
+```
+Rebalance plan:
+
+Closing / reducing:
+- AAPL:  30% → 20%    (partial close)
+- MSFT:  25% → 0%     (full close)
+- BTC:   20% → 15%    (partial close)
+
+Opening / increasing:
+- TSLA:  0%  → 15%    (new position)
+- NVDA: 10%  → 20%    (increase)
+
+Estimated time: about 2½ minutes.
 
 Proceed?
 ```
