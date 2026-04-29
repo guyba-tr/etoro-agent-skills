@@ -1,14 +1,14 @@
 # Worked Examples
 
-Reference for the `etoro-trading-assistant` skill. Two end-to-end conversation walkthroughs that show the rules from `execution-invariants.md` and the workflow references applied in practice — the tone, the pacing of confirmations, the order of steps, and what the user actually sees.
+Reference for the `etoro-trading-assistant` skill. Three end-to-end conversation walkthroughs that show the rules from `execution-invariants.md` and the workflow references applied in practice — the tone, the pacing of confirmations, the order of steps, and what the user actually sees.
 
 These are illustrative, not normative. Where they conflict with a workflow reference, the reference wins.
 
 ---
 
-## Example 1 — Single-trade open on a regular real account
+## Example 1 — Single-trade open on a main account
 
-**Scenario:** mid-conversation, the user (already authenticated with an API user-key for their real account) decides to buy AAPL.
+**Scenario:** mid-conversation, the user (already authenticated with an API user-key for their main eToro account) decides to buy AAPL. The environment (real vs demo) is determined from the key — the agent does not ask.
 
 ```
 USER: I want to buy $1,000 of AAPL.
@@ -17,38 +17,31 @@ USER: I want to buy $1,000 of AAPL.
 **Agent's internal steps** (not shown to the user):
 
 1. *Capture intent* (`single-trade-walkthrough.md` Step 1): action=open, symbol=AAPL, size=$1,000, direction=buy. All four required fields present.
-2. *Environment confirmation* (Step 2). First trade in the session — must ask.
 
-```
-ASSISTANT: Quick check before I place this — is this on your real account or your demo account?
-
-USER: Real.
-```
-
-3. *Resolve instrument ID* (Step 3). Not in cache.
+2. *Resolve instrument ID* (Step 2). Not in cache.
 
    Internal call: `GET /market-data/search?internalSymbolFull=AAPL` → `{ items: [{ instrumentId: 1001, internalSymbolFull: "AAPL", ... }] }`. Exact match on `AAPL`. Cache it.
 
-4. *Pre-flight cash* (Step 4). Read `/pnl`, compute Available Cash via `account-snapshot.md` §1 → $5,237. $1,000 ≤ $5,237 → proceed.
+3. *Pre-flight cash* (Step 3). Read `/pnl` for the active environment (per `api-conventions.md` "Demo vs. real environments" — the env was already determined the first time the agent hit `/pnl` this session). Compute Available Cash via `account-snapshot.md` §1 → $5,237. $1,000 ≤ $5,237 → proceed.
 
-5. *Confirm with the user* (Step 5):
+4. *Confirm with the user* (Step 4):
 
 ```
-ASSISTANT: Ready to place: buying $1,000 of AAPL at market on your real account, leverage 1× (no leverage). Proceed?
+ASSISTANT: Ready to place: buying $1,000 of AAPL at market, leverage 1× (no leverage). Proceed?
 
 USER: yes
 ```
 
-6. *Execute* (Step 6):
+5. *Execute* (Step 5):
 
-   - Endpoint: `POST /trading/execution/real/market-open-orders/by-amount`
+   - Endpoint: `POST /trading/execution/{env}/market-open-orders/by-amount` (with `{env}` = the determined environment, e.g. `real`).
    - Body: `{ "InstrumentID": 1001, "IsBuy": true, "Leverage": 1, "Amount": 1000 }`
    - Headers: `x-api-key`, `x-user-key`, `x-request-id` (fresh UUID v4).
    - Response: `200 { "orderId": "..." }` → at-most-once: done, move on (`execution-invariants.md` §3).
 
-7. *Verify* (Step 7). Re-read `/pnl`. New AAPL entry in `clientPortfolio.positions[]` at $1,000 / 5.57 units / `openRate` $179.50. Filled.
+6. *Verify* (Step 6). Re-read `/pnl`. New AAPL entry in `clientPortfolio.positions[]` at $1,000 / 5.57 units / `openRate` $179.50. Filled.
 
-8. *Report back* (Step 8) — in the user's framing (dollars + units), with cash-impact side effect:
+7. *Report back* (Step 7) — in the user's framing (dollars + units), with cash-impact side effect:
 
 ```
 ASSISTANT: Bought $1,000 of AAPL at $179.50 (5.57 units). Available cash dropped from $5,237 to $4,237.
@@ -56,7 +49,8 @@ ASSISTANT: Bought $1,000 of AAPL at $179.50 (5.57 units). Available cash dropped
 
 ### What you do NOT see in this example
 
-- **No anchor freeze ceremony** — for a single dollar-form trade with explicit cash pre-flight, the workflow doesn't need a frozen `EQUITY_ANCHOR` (the dollar amount IS the user's intent, not a derived one). If the user had said *"buy 5% of equity in AAPL"*, the agent would freeze `EQUITY_ANCHOR` at the start of Step 4, compute `amount_usd = floor(0.05 × EQUITY_ANCHOR × 100) / 100`, and verify the fill against that anchor (`execution-invariants.md` §§1–2).
+- **No "real or demo?" question.** The user-key is bound to one environment at creation; the agent already knows. (`api-conventions.md` "Demo vs. real environments".)
+- **No anchor freeze ceremony.** For a single dollar-form trade with explicit cash pre-flight, the workflow doesn't need a frozen `EQUITY_ANCHOR` (the dollar amount IS the user's intent, not a derived one). If the user had said *"buy 5% of equity in AAPL"*, the agent would freeze `EQUITY_ANCHOR` at the start of Step 3, compute `amount_usd = floor(0.05 × EQUITY_ANCHOR × 100) / 100`, and verify the fill against that anchor (`execution-invariants.md` §§1–2).
 - **No second-guessing on a 200 response.** The agent does not re-fire the same payload "to be safe" — that's the at-most-once rule.
 - **No "your trade was placed successfully" hand-wave.** The verification step (`positions[]` lookup) is what justifies the "Bought $1,000 of AAPL at $179.50" report. Without that, the agent would have to say "Order accepted; verifying…" and read `/pnl` before claiming the fill.
 

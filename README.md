@@ -10,7 +10,7 @@ The skills are plain markdown with `SKILL.md` entry points and supporting `refer
 
 - **`etoro-trading-assistant`** — the foundational runtime skill for any agent talking to the eToro Public API. Covers identity, behavioral norms, and **all execution workflows** (single trade, bulk portfolio build, rebalancing, conditional/triggered rules) plus the foundational eToro API knowledge (request conventions, account-snapshot formulas, ID resolution, session handling). Includes `references/execution-invariants.md` — the four cross-cutting rules (anchor freeze, ceilings on allocations, at-most-once delivery, never-hallucinate-on-401) that every workflow applies — and `references/examples.md` with end-to-end conversation walkthroughs.
 
-- **`etoro-agent-portfolios`** — narrow skill for the eToro **agent-portfolios product** (dedicated copy-traded accounts that mirror the user's real account proportionally). Covers only what's *different* about agent-portfolios: the product concept, the conversational onboarding flow (in `references/onboarding.md`), and two execution overrides — **Override A** (user-facing numbers are percentages of equity, never dollars) and **Override B** (always read live equity and cash from `/pnl` before every workflow). **Always loaded alongside `etoro-trading-assistant`** — agent-portfolio trade execution uses the workflow references in that skill, with these overrides applied throughout.
+- **`etoro-agent-portfolios`** — narrow skill for the eToro **agent-portfolios product** (dedicated copy-traded accounts that mirror the user's main account proportionally). Covers only what's *different* about agent-portfolios: the product concept, the conversational onboarding flow (in `references/onboarding.md`), and two execution overrides — **Override A** (user-facing numbers are percentages of equity, never dollars) and **Override B** (always read live equity and cash from `/pnl` before every workflow). **Always loaded alongside `etoro-trading-assistant`** — agent-portfolio trade execution uses the workflow references in that skill, with these overrides applied throughout.
 
 ## How to use
 
@@ -20,11 +20,14 @@ The skills are plain markdown with `SKILL.md` entry points and supporting `refer
 
 ### Mental model
 
-The execution workflows (single trade, bulk build, rebalance, conditional rules) work identically on regular eToro accounts and on agent-portfolios. The only meaningful differences are:
+The two account types are **main accounts** (the user's primary eToro account, can be either real or demo per the API key's environment scope) and **agent-portfolios** (dedicated copy-traded accounts, always real-environment). Both are real eToro accounts holding real money in production — the contrast is *which account*, not real-vs-fake.
 
-- **Display format**: regular accounts use absolute dollar amounts (and units where relevant); agent-portfolios use percentages of equity. The agent-portfolios skill enforces this override.
-- **Onboarding**: agent-portfolios have a creation flow; regular accounts use the user's existing API key directly.
-- **API user key (`x-user-key`)**: regular accounts use the user's main API user-key; agent-portfolios use the agent-portfolio's `userToken` from the creation flow.
+The execution workflows (single trade, bulk build, rebalance, conditional rules) work identically on both. The only meaningful differences:
+
+- **Display format**: main accounts use absolute dollar amounts (and units where relevant); agent-portfolios use percentages of equity. The agent-portfolios skill enforces this override.
+- **Onboarding**: agent-portfolios have a creation flow; main accounts use the user's existing API key directly.
+- **API user key (`x-user-key`)**: main accounts use the user's own main-account API user-key; agent-portfolios use the agent-portfolio's `userToken` from the creation flow.
+- **Environment**: a main-account user-key is bound to one environment (real or demo) at creation — the agent determines which by probing, never asks the user. Agent-portfolios are always real.
 
 Everything else — endpoints, headers (including the canonical `x-api-key`), rate limits, the 60-second PnL cache, validation rules, retry strategies — is identical.
 

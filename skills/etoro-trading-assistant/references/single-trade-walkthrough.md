@@ -1,6 +1,6 @@
 # Single Trade Walkthrough
 
-Reference for the `etoro-trading-assistant` skill. Load this when the user requests a **single trade** on a regular eToro account — *"buy $1,000 of AAPL"*, *"close my MSFT position"*, *"set a limit order on TSLA at $200"*. For multi-position bulk actions or anything agent-portfolio-related, see the `etoro-agent-portfolios` skill instead.
+Reference for the `etoro-trading-assistant` skill. Load this when the user requests a **single trade** — *"buy $1,000 of AAPL"*, *"close my MSFT position"*, *"set a limit order on TSLA at $200"*. Applies to both main accounts and agent-portfolios. For multi-position bulk actions, see `bulk-trading.md`. For anything agent-portfolio-specific (onboarding, the percentages override), see the `etoro-agent-portfolios` skill.
 
 This walkthrough threads the other references in this skill (`api-conventions.md`, `account-snapshot.md`, `id-resolution.md`, `sso-and-session.md`) into one end-to-end flow. Where this walkthrough conflicts with another reference, the other reference wins — this is an integration map, not the authoritative source.
 
@@ -13,7 +13,7 @@ Source guides:
 
 ## Account context
 
-This walkthrough applies to **both regular eToro accounts and agent-portfolios**. Examples below use **dollar amounts** — the regular-account default.
+This walkthrough applies to **both main eToro accounts and agent-portfolios**. Examples below use **dollar amounts** — the main-account default.
 
 > **Agent-portfolio override:** if you reached this walkthrough from the `etoro-agent-portfolios` skill, apply **Override A** from that skill — replace dollar amounts with **percentages of equity** in every user-facing message (intent confirmation, error messages, outcome reports). Internally the API still takes USD `Amount` values; convert via `amount_usd = pct × EQUITY_ANCHOR`. The endpoint shapes, validation rules, and timing are unchanged.
 
@@ -45,11 +45,7 @@ Optional fields — only include if the user explicitly asks:
 - `Leverage` — default = 1 (per `api-conventions.md` "Leverage"). Send `1` explicitly even when not asked.
 - `StopLossRate` / `TakeProfitRate` — for limit orders, see the SL/TP > 0 rule in `api-conventions.md`.
 
-### Step 2 — Confirm environment (first trade in the session)
-
-Before the first trade in the session, ask whether the user means **real** or **demo**. The endpoint paths differ (`/trading/execution/...` vs `/trading/execution/demo/...`) and the consequence of mismatched intent is obvious. Once confirmed, remember the choice for the rest of the session unless the user says otherwise.
-
-### Step 3 — Resolve the instrument ID
+### Step 2 — Resolve the instrument ID
 
 If the symbol is already in your conversation cache (see `id-resolution.md` §1), use the cached `instrumentId`. Otherwise resolve live:
 
@@ -64,7 +60,7 @@ GET /market-data/search?internalSymbolFull=<SYMBOL>
 
 Casing reminder: the search response uses `instrumentId` (lowercase `d`). See `api-conventions.md` for the per-endpoint casing table.
 
-### Step 4 — Pre-flight (opens only)
+### Step 3 — Pre-flight (opens only)
 
 For an **open**, verify the user has enough Available Cash before submitting:
 
@@ -93,12 +89,12 @@ Compute Available Cash via the formula in `account-snapshot.md` §1.
 
 For a **close**, no cash pre-flight is needed — the position already exists.
 
-### Step 5 — Confirm with the user
+### Step 4 — Confirm with the user
 
 Show the planned trade in plain language and wait for confirmation:
 
 ```
-Buying $1,000 of AAPL at market on your real account.
+Buying $1,000 of AAPL at market.
 Leverage: 1× (no leverage).
 Proceed?
 ```
@@ -114,7 +110,7 @@ Compute the current value as `position.amount + position.unrealizedPnL.pnL`. (Bo
 
 Skip confirmation only when the user has already opted into "execute automatically for this session."
 
-### Step 6 — Execute
+### Step 5 — Execute
 
 #### Open by amount (cash)
 
@@ -179,20 +175,20 @@ Per `api-conventions.md` "Other optional parameters", omit anything the user did
 
 #### At-most-once: never retry on ambiguity
 
-Trade-execution POSTs follow the at-most-once rule in `execution-invariants.md` §3. **2xx with an order ID** → done, move on. **Explicit error** (4xx non-429, or 5xx) → log and stop, don't retry the same payload. **Ambiguous outcome** (timeout, connection reset, no response, parse error) → don't retry; go straight to Step 7 and check `positions[]` / `ordersForOpen[]`. Only **429** is safe to retry.
+Trade-execution POSTs follow the at-most-once rule in `execution-invariants.md` §3. **2xx with an order ID** → done, move on. **Explicit error** (4xx non-429, or 5xx) → log and stop, don't retry the same payload. **Ambiguous outcome** (timeout, connection reset, no response, parse error) → don't retry; go straight to Step 6 and check `positions[]` / `ordersForOpen[]`. Only **429** is safe to retry.
 
 #### Sizing — stated percentages are CEILINGS
 
-When the user expresses intent as a percentage (*"buy 5% of equity in BTC"*) — common on agent-portfolios, occasional on regular accounts — apply the ceilings rule from `execution-invariants.md` §2:
+When the user expresses intent as a percentage (*"buy 5% of equity in BTC"*) — common on agent-portfolios, occasional on main accounts — apply the ceilings rule from `execution-invariants.md` §2:
 
 ```
 EQUITY_ANCHOR = equity from a fresh /pnl read at the start of this trade
 amount_usd    = floor(pct × EQUITY_ANCHOR × 100) / 100
 ```
 
-Send `Amount: amount_usd` exactly. Mirror image for dollar-form intents — *"buy $300 of BTC"* means send `$300`, not `$305` for cleanliness. Step 7 verification surfaces any over-fill (which would be an agent-side bug) and offers a corrective partial close.
+Send `Amount: amount_usd` exactly. Mirror image for dollar-form intents — *"buy $300 of BTC"* means send `$300`, not `$305` for cleanliness. Step 6 verification surfaces any over-fill (which would be an agent-side bug) and offers a corrective partial close.
 
-### Step 7 — Verify the order landed
+### Step 6 — Verify the order landed
 
 A successful POST means the order was **accepted**, not necessarily filled. Three landing states are possible:
 
@@ -210,9 +206,9 @@ If the failure was a **401** (the credential is no longer valid — typically th
 - For a **single close**: confirm the position is **gone** from `positions[]` (full close) or has **smaller `units`** (partial close). If neither happened after a re-read, treat as failed.
 - **If you'll execute another trade right after that depends on freed cash**: wait the full 60 seconds before reading `/pnl` again — Available Cash relies on `credit` and `ordersForOpen` aggregation, which are subject to the cache. (This pattern usually means you're about to enter the rebalance flow — load `rebalancing.md`.)
 
-### Step 8 — Report back
+### Step 7 — Report back
 
-Tell the user the outcome in their original framing — **dollars and units, not percentages of equity**. (Percentages of equity are only used for agent-portfolios, per Override A in that skill. Regular accounts always use absolute dollar amounts.)
+Tell the user the outcome in their original framing — **dollars and units, not percentages of equity**. (Percentages of equity are only used for agent-portfolios, per Override A in that skill. Main accounts always use absolute dollar amounts.)
 
 - *"Bought $1,000 of AAPL at $179.50 (5.6 units)."*
 - *"Order accepted — will fill when the US market opens (in ~3 hours)."*
@@ -228,7 +224,7 @@ Include side effects when meaningful (e.g. *"Available cash dropped from $8,000 
 - **Trade-execution request-body field is `InstrumentID`** (capital `D`) — same convention as the PnL response. The official guide example shows lowercase `d` (`InstrumentId`), but in practice the API expects capital `D`. The search response separately uses `instrumentId` (lowercase `d`), but that's a *response* field, not a request field.
 - **Closing requires `positionId`, not `instrumentId`.** A position is a specific line-item in the portfolio. If the user has two AAPL positions (e.g. opened at different times), you need to pick the right one or close them both explicitly.
 - **Don't synthesize the order's fill price from PnL.** Read it from the position itself once filled. Computing it from `unrealizedPnL.pnL / units` will drift from eToro's own valuation (see `account-snapshot.md` §3).
-- **`/trading/info/trade/history` is real-only.** If the user asks "what did I trade this week" on a demo account, the endpoint returns `InsufficientPermissions` — surface a specific message rather than a generic auth error.
+- **`/trading/info/trade/history` is real-environment only.** If the user asks "what did I trade this week" on a demo-environment key, the endpoint returns `InsufficientPermissions` — surface a specific message rather than a generic auth error.
 
 ## Sanity checks
 
@@ -240,7 +236,7 @@ Cross-cutting invariants (covered by `execution-invariants.md`):
 
 Single-trade-specific:
 
-- [ ] Environment confirmed (real or demo) before the first trade in the session.
+- [ ] Environment determined from the key, not from the user (`api-conventions.md` "Demo vs. real environments"); same `{env}` segment used for the pre-flight `/pnl` read and the execution POST.
 - [ ] Symbol resolved to a verified `instrumentId`; exact-match check on `internalSymbolFull` performed.
 - [ ] For opens: Available Cash computed via `account-snapshot.md` §1 and verified ≥ requested amount.
 - [ ] For closes: `positionId` looked up from `positions[]`, not assumed; if multiple positions exist on the same instrument, the user picked which one.
@@ -256,4 +252,4 @@ Single-trade-specific:
 - `account-snapshot.md` — Available Cash formula and the rest of the PnL response shape.
 - `sso-and-session.md` — handling 401s during execution.
 
-For multi-position actions (build a portfolio, rebalance, conditional/triggered rules), don't use this walkthrough — load the `etoro-agent-portfolios` skill.
+For multi-position actions (build a portfolio, rebalance, conditional/triggered rules), don't use this walkthrough — load `bulk-trading.md`, `rebalancing.md`, or `conditional-rules.md` as appropriate.

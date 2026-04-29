@@ -1,6 +1,6 @@
 # Execution Invariants
 
-Reference for the `etoro-trading-assistant` skill. Four cross-cutting rules apply to **every** trade-execution workflow in this skill — single trade, bulk build, rebalance, conditional-rule trigger — regardless of whether you're operating on a regular account or an agent-portfolio.
+Reference for the `etoro-trading-assistant` skill. Four cross-cutting rules apply to **every** trade-execution workflow in this skill — single trade, bulk build, rebalance, conditional-rule trigger — regardless of whether you're operating on a main account or an agent-portfolio.
 
 Each workflow reference points back here for the canonical statement; workflow-specific applications (e.g. the close-buffer in `rebalancing.md`, the cumulative `spent_so_far` check in `bulk-trading.md`) are documented in their own files.
 

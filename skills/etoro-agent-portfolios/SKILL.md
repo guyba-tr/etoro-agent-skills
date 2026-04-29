@@ -1,17 +1,17 @@
 ---
 name: etoro-agent-portfolios
-description: Create and operate eToro agent-portfolios — dedicated copy-traded accounts whose trades are mirrored proportionally into the user's real eToro account. Covers the onboarding flow (API key collection, portfolio creation, secret-token handoff) and the agent-portfolio-specific execution overrides (percentages of equity in user-facing output instead of dollars; freeze live equity and cash before every workflow). Use when the user mentions agent-portfolios, asks to create or set up an agent-portfolio, list existing agent-portfolios, copy-trade through one, or have the agent operate trades on an agent-portfolio's behalf. Load alongside `etoro-trading-assistant` — that skill carries the actual trade-execution workflows.
+description: Create and operate eToro agent-portfolios — dedicated copy-traded accounts whose trades are mirrored proportionally into the user's main eToro account. Covers the onboarding flow (API key collection, portfolio creation, secret-token handoff) and the agent-portfolio-specific execution overrides (percentages of equity in user-facing output instead of dollars; freeze live equity and cash before every workflow). Use when the user mentions agent-portfolios, asks to create or set up an agent-portfolio, list existing agent-portfolios, copy-trade through one, or have the agent operate trades on an agent-portfolio's behalf. Load alongside `etoro-trading-assistant` — that skill carries the actual trade-execution workflows.
 ---
 
 # eToro Agent Portfolios
 
-Use this skill when the user wants to **create or operate an agent-portfolio**. This skill assumes `etoro-trading-assistant` is also loaded — agent-portfolio trade execution uses the same workflows (single trade, bulk build, rebalancing, conditional rules) as a regular account, with two agent-portfolio-specific overrides applied throughout.
+Use this skill when the user wants to **create or operate an agent-portfolio**. This skill assumes `etoro-trading-assistant` is also loaded — agent-portfolio trade execution uses the same workflows (single trade, bulk build, rebalancing, conditional rules) as a main account, with two agent-portfolio-specific overrides applied throughout.
 
 > ⚠️ **Don't try to handle agent-portfolio trades using only this skill.** All execution flows live in `etoro-trading-assistant`. This skill carries only what's *different* about agent-portfolios — the product concept, the onboarding flow (in `references/onboarding.md`), and the two execution overrides below.
 
 ## What's different about agent-portfolios
 
-Trade execution against an agent-portfolio uses identical infrastructure to a regular account: same Public API endpoints, same headers, same rate limits, same 60-second PnL cache, same workflows (single trade, bulk, rebalance, conditional rules). The only execution difference is that the `x-user-key` header carries the agent-portfolio's `userToken` (from creation; see `references/onboarding.md`) instead of the user's main-account key.
+Trade execution against an agent-portfolio uses identical infrastructure to a main account: same Public API endpoints, same headers, same rate limits, same 60-second PnL cache, same workflows (single trade, bulk, rebalance, conditional rules). The only execution difference is that the `x-user-key` header carries the agent-portfolio's `userToken` (from creation; see `references/onboarding.md`) instead of the user's main-account key.
 
 What's specific to agent-portfolios:
 
@@ -24,9 +24,9 @@ What's specific to agent-portfolios:
 
 A dedicated eToro account that the agent operates on its own credentials. The agent-portfolio has its own equity, sized by eToro at creation time — **read the actual value live from `/pnl`; do not assume a fixed amount.** That equity figure (and any per-position dollar amounts derived from it) is operational context for the agent's sizing decisions, not user-facing information.
 
-When the user creates one, they specify an `investmentAmountInUsd` which is **real money deducted from their real eToro account** to copy-trade the agent-portfolio. Positions opened by the agent-portfolio are mirrored proportionally into the user's real account: if the agent-portfolio allocates *N%* of its equity to AAPL, the user's mirror allocates *N%* of their `investmentAmountInUsd` to AAPL. The agent-portfolio's absolute equity and the user's investment amount are independent inputs — the proportion is what mirrors.
+When the user creates one, they specify an `investmentAmountInUsd` which is **funds deducted from their main eToro account** to copy-trade the agent-portfolio. Positions opened by the agent-portfolio are mirrored proportionally into the user's main account: if the agent-portfolio allocates *N%* of its equity to AAPL, the user's mirror allocates *N%* of their `investmentAmountInUsd` to AAPL. The agent-portfolio's absolute equity and the user's investment amount are independent inputs — the proportion is what mirrors.
 
-The agent trades on behalf of the agent-portfolio using **the agent-portfolio's own user token**. All endpoints are the **real** Public API endpoints (no `/demo/` segment); agent-portfolios are real accounts.
+The agent trades on behalf of the agent-portfolio using **the agent-portfolio's own user token**. Agent-portfolios always live in the real environment — endpoints never carry the `/demo/` segment.
 
 ## Override A — user-facing numbers are percentages of equity, never dollars
 
@@ -38,7 +38,7 @@ The agent trades on behalf of the agent-portfolio using **the agent-portfolio's 
 | "75% cash" | "$7,500 cash" |
 | "Invest 2.5% in AAPL" | "Invest $250 in AAPL" |
 
-This rule **overrides the regular-account dollar default** in every workflow loaded from `etoro-trading-assistant`. Applies to:
+This rule **overrides the main-account dollar default** in every workflow loaded from `etoro-trading-assistant`. Applies to:
 
 - `single-trade-walkthrough.md` — replace dollars with percentages in user-facing intent confirmations, error messages, and outcome reports.
 - `bulk-trading.md` — use percentages in plan confirmations and post-execution reports.
@@ -47,7 +47,7 @@ This rule **overrides the regular-account dollar default** in every workflow loa
 
 Internal API calls still use dollar `Amount` fields — convert at the call site as `amount_usd = pct × EQUITY_ANCHOR` (per the execution invariants — see Override B). The user never sees the dollar number.
 
-The single exception is `investmentAmountInUsd` at portfolio creation — that's the user's *own real account* funds being committed, so it's named in dollars (see `references/onboarding.md` Step 2).
+The single exception is `investmentAmountInUsd` at portfolio creation — that's the user's *own main-account* funds being committed, so it's named in dollars (see `references/onboarding.md` Step 2).
 
 ## Override B — always read live equity and cash before every workflow
 
@@ -83,7 +83,7 @@ For all of the above:
 - Apply Override A (percentages, never dollars) to user-facing output.
 - Apply Override B (always read live equity/cash from `/pnl` first) — this is the agent-portfolio-specific application of the anchor-freeze invariant.
 - Apply all other invariants from `execution-invariants.md` (ceilings on allocations, at-most-once delivery, never-hallucinate-on-401) unchanged.
-- Approval-mode handling is the same as for regular accounts — default to "ask before each trade" unless the user opts into auto-execute (e.g. for recurring rebalancing).
+- Approval-mode handling is the same as for main accounts — default to "ask before each trade" unless the user opts into auto-execute (e.g. for recurring rebalancing).
 
 ## Presenting the agent-portfolio to the user
 
@@ -103,7 +103,7 @@ Your agent-portfolio:
 | Concept | Detail |
 |---|---|
 | Agent-portfolio equity | The agent-portfolio's own funds, varies over time as positions move. Read live from `/pnl` at the start of every workflow per Override B. **Hidden from the user** per Override A; used only as internal context for sizing. |
-| `investmentAmountInUsd` | Real money deducted from the *user's real account* to copy-trade this portfolio. The one place where a dollar amount appears in user-facing language — it's the user's own real funds being committed at creation. |
+| `investmentAmountInUsd` | Funds deducted from the *user's main account* to copy-trade this portfolio. The one place where a dollar amount appears in user-facing language — it's the user's own main-account funds being committed at creation. |
 | Proportional mirroring | The agent-portfolio's allocation percentage equals the user's mirror allocation percentage. If the agent-portfolio allocates 5% of its equity to AAPL, the user's mirror allocates 5% of their `investmentAmountInUsd` to AAPL. The agent-portfolio's absolute equity and the user's investment are independent inputs. |
 | User token | Secret created once at portfolio creation. User must store it themselves (see `references/onboarding.md` Step 3). |
 | `scopeIds` | `202` = real:write (default and required for trading). |

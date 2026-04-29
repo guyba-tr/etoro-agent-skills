@@ -41,7 +41,7 @@ Call `GET /trading/info/real/pnl`. (For the response shape and aggregation formu
 | Parameter | Required | Notes |
 |---|---|---|
 | **Portfolio name** | Yes | 6–10 characters, unique. Maps to `agentPortfolioName`. |
-| **Investment amount** | Yes | USD; real funds drawn from the user's real account. Maps to `investmentAmountInUsd`. (This is one of the few places dollars appear in user-facing language — it's the user's *own real account* funds being committed, not the agent-portfolio's internal balance.) |
+| **Investment amount** | Yes | USD; funds drawn from the user's main account. Maps to `investmentAmountInUsd`. (This is one of the few places dollars appear in user-facing language — it's the user's *own main-account* funds being committed, not the agent-portfolio's internal balance.) |
 
 Auto-generate (don't ask the user):
 
@@ -96,7 +96,7 @@ For trade-execution errors (429 rate limit, 401 mid-session, etc.), see `etoro-t
 
 ## When the `userToken` stops working (401)
 
-If a Public API call using an agent-portfolio's `userToken` returns 401 Unauthorized, the `userToken` has been revoked or invalidated — same behavior as a regular-account user-key being revoked. There is **no refresh** for an agent-portfolio `userToken`.
+If a Public API call using an agent-portfolio's `userToken` returns 401 Unauthorized, the `userToken` has been revoked or invalidated — same behavior as a main-account user-key being revoked. There is **no refresh** for an agent-portfolio `userToken`.
 
 Recovery (per `etoro-trading-assistant`'s `references/execution-invariants.md` §4):
 

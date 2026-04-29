@@ -8,7 +8,7 @@ The agent's job here is to execute many opens accurately, respect the 20 req/min
 
 ## Account context
 
-This workflow applies to **both regular eToro accounts and agent-portfolios**. Examples below use **dollar amounts** — the regular-account default.
+This workflow applies to **both main eToro accounts and agent-portfolios**. Examples below use **dollar amounts** — the main-account default.
 
 > **Agent-portfolio override:** if you reached this reference from the `etoro-agent-portfolios` skill, apply **Override A** from that skill — replace dollar amounts with **percentages of equity** in every user-facing message (confirmations, reports, error explanations). Internally you still compute `amount_usd = pct × EQUITY_ANCHOR` to make the API calls (the API always takes USD); the user just never sees the dollar number. Endpoint shapes, validation rules, rate limits, and timing are all identical.
 
@@ -30,8 +30,8 @@ For an existing portfolio that needs to move to a new allocation, see `rebalanci
 
 The user (or planning step) provides the plan in one of two forms:
 
-- **Dollar amounts** (regular-account default): *"$2,500 in AAPL, $1,500 in MSFT, $1,000 in BTC."* Use these directly as `Amount` values in the API calls.
-- **Percentages of equity** (agent-portfolio default; some users on regular accounts also prefer this): *"25% AAPL, 15% MSFT, 10% BTC."* Convert internally via `amount_usd = pct × equity`. Preserve the percentage form for user-facing output if they entered it that way.
+- **Dollar amounts** (main-account default): *"$2,500 in AAPL, $1,500 in MSFT, $1,000 in BTC."* Use these directly as `Amount` values in the API calls.
+- **Percentages of equity** (agent-portfolio default; some users on main accounts also prefer this): *"25% AAPL, 15% MSFT, 10% BTC."* Convert internally via `amount_usd = pct × equity`. Preserve the percentage form for user-facing output if they entered it that way.
 
 Reject plans that **mix the two forms** (e.g. "AAPL at 25%, MSFT at $1,500") — ask the user to standardize.
 
@@ -67,7 +67,7 @@ Both values are used for ALL sizing decisions, the cumulative `spent_so_far` che
 
 `total_planned = Σ(amount_usd)` where each `amount_usd = floor(pct × EQUITY_ANCHOR × 100) / 100` (see §4 Sizing). If `total_planned > CASH_ANCHOR`, **stop — do not start executing, and do not silently switch to a rebalance flow.** Present the gap and let the user choose explicitly. Two situations:
 
-- **Initial build (regular account or agent-portfolio)**: there are no existing positions to close, so the only meaningful response is *"shrink the plan."* Tell the user the gap (in dollars on regular accounts, in percentages on agent-portfolios per the override) and ask them to revise.
+- **Initial build (main account or agent-portfolio)**: there are no existing positions to close, so the only meaningful response is *"shrink the plan."* Tell the user the gap (in dollars on main accounts, in percentages on agent-portfolios per the override) and ask them to revise.
 
 - **New trade(s) on an existing portfolio with insufficient cash**: closing existing positions to fund the new trade IS an option, but it requires **explicit user consent** — closes are destructive actions, and the foundational norm in `etoro-trading-assistant`'s SKILL.md is *"Any open / close / cancel / modify requires explicit user confirmation"*. **Don't assume the user wants to liquidate existing exposure to fund the new request.** Present both options and let them pick:
 
@@ -94,7 +94,7 @@ Both values are used for ALL sizing decisions, the cumulative `spent_so_far` che
 In approval-required mode, show the proposed allocation and the expected duration. **Match the user's input format** — dollars if they gave dollars, percentages if they gave percentages (or always percentages if running in agent-portfolio context):
 
 ```
-I'm about to open 8 positions on your real account:
+I'm about to open 8 positions:
 - AAPL:   $2,500
 - MSFT:   $1,500
 - GOOGL:  $1,000
@@ -246,11 +246,11 @@ expected_amount = floor(stated_pct × EQUITY_ANCHOR × 100) / 100   // or the us
 actual_amount   = position.amount
 ```
 
-Any `actual_amount > expected_amount` is a ceiling violation (agent-side bug). Surface it clearly and offer a corrective partial close — `over = actual_amount − expected_amount`, then partial-close `over` worth of the position (translate to `UnitsToDeduct` per `single-trade-walkthrough.md` Step 6). The corrective close itself follows at-most-once (invariants §3) — re-verify via `/pnl`, don't retry on ambiguity.
+Any `actual_amount > expected_amount` is a ceiling violation (agent-side bug). Surface it clearly and offer a corrective partial close — `over = actual_amount − expected_amount`, then partial-close `over` worth of the position (translate to `UnitsToDeduct` per `single-trade-walkthrough.md` Step 5). The corrective close itself follows at-most-once (invariants §3) — re-verify via `/pnl`, don't retry on ambiguity.
 
 ### Communication template
 
-In approval mode, after executing (regular-account / dollar version):
+In approval mode, after executing (main-account / dollar version):
 
 ```
 Build complete. Status:
@@ -294,5 +294,5 @@ Bulk-specific:
 - [ ] Trade-execution requests spaced ≥ 3s; 20 req/min budget tracked.
 - [ ] Other per-trade failures (400, 5xx) logged and reported but don't abort the batch.
 - [ ] Post-execution: 60s wait, then `/pnl` re-read; results categorized as filled / pending / failed / ambiguous-but-missing; ambiguous resolved by reading `positions[]`/`ordersForOpen[]`.
-- [ ] User-facing report uses the same unit the user gave you (dollars on regular accounts; percentages in agent-portfolio context); pending-market-open distinction explicitly surfaced.
+- [ ] User-facing report uses the same unit the user gave you (dollars on main accounts; percentages in agent-portfolio context); pending-market-open distinction explicitly surfaced.
 

@@ -8,7 +8,7 @@ The execution borrows directly from `bulk-trading.md`; the new content here is t
 
 ## Account context
 
-This workflow applies to **both regular eToro accounts and agent-portfolios**. Examples below use **dollar amounts** — the regular-account default.
+This workflow applies to **both main eToro accounts and agent-portfolios**. Examples below use **dollar amounts** — the main-account default.
 
 > **Agent-portfolio override:** if you reached this reference from the `etoro-agent-portfolios` skill, apply **Override A** from that skill — replace dollar amounts with **percentages of equity** in every user-facing message. Internally compute `amount_usd = pct × EQUITY_ANCHOR` for the API calls. Endpoint shapes, validation rules, phase ordering, the 60-second cache wait, and the 20 req/min rate limit are all identical.
 
@@ -19,13 +19,13 @@ This workflow applies to **both regular eToro accounts and agent-portfolios**. E
 - User asks to rebalance to a new target allocation.
 - Recurring auto-rebalance ("rebalance weekly to my model portfolio").
 - User asks to swap one instrument for another in size, or to scale a position up/down.
-- **User has explicitly approved closing existing positions to fund a new trade that doesn't fit current cash.** This is the "Insufficient-cash variant" below. The trigger is *user consent*, not the cash shortfall itself — when a new trade exceeds available cash, the agent's first move is to **stop and ask** whether to shrink the plan or free cash via closes (see `bulk-trading.md` §2 "Sufficiency check" and `single-trade-walkthrough.md` Step 4 for the consent template). Only after the user picks the close-to-fund path do you enter this reference.
+- **User has explicitly approved closing existing positions to fund a new trade that doesn't fit current cash.** This is the "Insufficient-cash variant" below. The trigger is *user consent*, not the cash shortfall itself — when a new trade exceeds available cash, the agent's first move is to **stop and ask** whether to shrink the plan or free cash via closes (see `bulk-trading.md` §2 "Sufficiency check" and `single-trade-walkthrough.md` Step 3 for the consent template). Only after the user picks the close-to-fund path do you enter this reference.
 
 ---
 
 ## Insufficient-cash variant
 
-**Entry condition: the user has just explicitly approved closing existing positions to fund a new trade.** This is not entered automatically when a new trade exceeds available cash — the consent gate lives in `bulk-trading.md` §2 / `single-trade-walkthrough.md` Step 4. Don't reach this section by silently inferring intent from a cash shortfall.
+**Entry condition: the user has just explicitly approved closing existing positions to fund a new trade.** This is not entered automatically when a new trade exceeds available cash — the consent gate lives in `bulk-trading.md` §2 / `single-trade-walkthrough.md` Step 3. Don't reach this section by silently inferring intent from a cash shortfall.
 
 Once the user has approved the close-to-fund path, the rebalance is narrower than a full target-replacement: only enough existing exposure needs to be reduced to free the required cash; the rest of the portfolio stays put.
 
@@ -69,7 +69,7 @@ From here the flow is identical to a standard rebalance — reuse §§ 5–8 bel
 
 ### D. Communicate the trade-off to the user
 
-Be explicit that opening this trade costs them existing exposure. Mention the small over-close buffer so the user isn't surprised by a few extra dollars / basis points being freed. Regular-account / dollar version:
+Be explicit that opening this trade costs them existing exposure. Mention the small over-close buffer so the user isn't surprised by a few extra dollars / basis points being freed. Main-account / dollar version:
 
 ```
 To open AAPL at $1,500, I need to free $300 of cash (plus a $3 safety buffer
@@ -107,7 +107,7 @@ These anchors stay frozen across BOTH phases of the rebalance (closes and opens)
 
 Also compute, per `account-snapshot.md`:
 
-- For each open position, its current dollar value (`position.amount + position.unrealizedPnL.pnL`) and current weight (`position.amount / EQUITY_ANCHOR` — useful for diff math even on regular accounts).
+- For each open position, its current dollar value (`position.amount + position.unrealizedPnL.pnL`) and current weight (`position.amount / EQUITY_ANCHOR` — useful for diff math even on main accounts).
 - Capture pending orders too (`ordersForOpen[]`, `orders[]`) — they affect available cash but aren't yet filled positions.
 
 ---
@@ -188,7 +188,7 @@ amount_usd = floor(target_pct × EQUITY_ANCHOR × 100) / 100   // for percentage
 
 ## 4. Confirm with the user (approval mode = "ask")
 
-Regular-account version:
+Main-account version:
 
 ```
 Rebalance plan:
@@ -291,5 +291,5 @@ Rebalance-specific:
 - [ ] **60-second PnL cache wait between phases** — non-negotiable.
 - [ ] Live cash re-verified after closes (`liveCash ≥ Σ planned_opens`); the buffer should make this comfortable — if short anyway, investigate (silent close failure? pending orders?) before proceeding.
 - [ ] Rate-limit budget tracked across BOTH phases; no assumption of a fresh 20/min after the cache wait.
-- [ ] Final state reported in the user's unit (dollars on regular accounts; percentages in agent-portfolio context); pending-market-open status surfaced.
+- [ ] Final state reported in the user's unit (dollars on main accounts; percentages in agent-portfolio context); pending-market-open status surfaced.
 - [ ] For auto-rebalance: plan logged before execution so a stuck batch can be diagnosed later.

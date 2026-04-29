@@ -8,7 +8,7 @@ This pattern wraps the standard single-trade open/close primitives (in `single-t
 
 ## Account context
 
-This workflow applies to **both regular eToro accounts and agent-portfolios**. Examples below use **dollar amounts** — the regular-account default.
+This workflow applies to **both main eToro accounts and agent-portfolios**. Examples below use **dollar amounts** — the main-account default.
 
 > **Agent-portfolio override:** if you reached this reference from the `etoro-agent-portfolios` skill, apply **Override A** from that skill — replace dollar amounts with **percentages of equity** in every user-facing message (rule confirmations, trigger notifications, failure reports). Internally the rule's `size` field can hold either a dollar amount or a percentage; convert via `amount_usd = pct × EQUITY_ANCHOR` at trigger time. The condition definitions, polling cadence, cooldowns, and safety controls don't change.
 
@@ -41,7 +41,7 @@ Free-text rules are brittle. Translate the user's request into a structured obje
 | `last_triggered_at` | `null` | Updated on each trigger |
 | `trigger_count` | `0` | Updated on each trigger |
 
-The unit on `size` and `target` (dollars vs weight) follows the user's framing: dollars on regular accounts; weights in agent-portfolio context. Never mix the two within a single rule.
+The unit on `size` and `target` (dollars vs weight) follows the user's framing: dollars on main accounts; weights in agent-portfolio context. Never mix the two within a single rule.
 
 Always **echo the structured form back to the user for confirmation** before activating:
 
@@ -184,7 +184,7 @@ For percentage-form rules (`size: { weight: 0.025 }`, common on agent-portfolios
 
 ## 6. Communication when rules fire
 
-Always immediate, in the user's unit. Regular-account / dollar version:
+Always immediate, in the user's unit. Main-account / dollar version:
 
 ```
 Rule triggered: AAPL fell below $180 → opened $250 position.
@@ -243,4 +243,4 @@ Conditional-rules-specific:
 - [ ] Cooldown set on every rule (default 1h) to prevent rapid re-firing.
 - [ ] `max_triggers` defaulted to 5 unless user requested otherwise.
 - [ ] Pending-market-open status surfaced when the triggered trade can't fill immediately.
-- [ ] Communication uses the user's unit (dollars on regular accounts; percentages in agent-portfolio context); units consistent throughout the rule's lifecycle.
+- [ ] Communication uses the user's unit (dollars on main accounts; percentages in agent-portfolio context); units consistent throughout the rule's lifecycle.

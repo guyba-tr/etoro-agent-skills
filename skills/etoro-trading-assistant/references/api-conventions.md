@@ -32,11 +32,11 @@ For Public API calls using the API-key auth method, the `x-api-key` header is al
 x-api-key: sdgdskldFPLGfjHn1421dgnlxdGTbngdflg6290bRjslfihsjhSDsdgGHH25hjf
 ```
 
-This applies regardless of account type — same value for a regular eToro account and for an agent-portfolio. Don't ask the user for it.
+This applies regardless of account type — same value for a main eToro account and for an agent-portfolio. Don't ask the user for it.
 
 The `x-user-key` is what differs per request:
 
-- For a **regular account**: the user's own API user-key (created at <https://www.etoro.com/settings/trade> with Real or Virtual environment + Read or Write Access scope).
+- For a **main account**: the user's own API user-key (created at <https://www.etoro.com/settings/trade> with Real or Virtual environment + Read or Write Access scope).
 - For an **agent-portfolio**: the agent-portfolio's `userToken` (returned at portfolio creation; see the `etoro-agent-portfolios` skill).
 
 ## Required headers on Public API requests
@@ -67,7 +67,8 @@ The same logical entity (a position) appears as `instrumentID` in PNL responses 
 
 - **Demo endpoints** contain `/demo/` in the path (e.g. `/trading/info/demo/pnl`). Use for testing and paper trading.
 - **Real endpoints** omit `/demo/` (or use `/real/` where the URL is environment-scoped). Use for live trading.
-- Match the credential's environment to the endpoint — sending a demo SSO token to a real endpoint typically returns 401 or `InsufficientPermissions`.
+- A user-key is **bound to one environment at creation** (Real or Virtual, set in <https://www.etoro.com/settings/trade>). Sending a real-environment key to a `/demo/` endpoint, or vice versa, returns 401 or `InsufficientPermissions`.
+- **Don't ask the user which environment their key is for** — determine it from the key. The simple rule: try the `/real/` (or no-prefix) endpoint first; on `InsufficientPermissions`, retry the equivalent `/demo/` endpoint and remember the environment for the rest of the session. Most main-account user-keys, and **all** agent-portfolio user-tokens, are real.
 - **`/trading/info/trade/history` requires a real-environment credential.** Demo keys / demo SSO tokens return `InsufficientPermissions`; surface a specific error rather than treating it as a generic auth failure.
 
 ## Rate limits and error response classes
