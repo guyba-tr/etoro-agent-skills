@@ -29,7 +29,7 @@ The execution workflows (single trade, bulk build, rebalance, conditional rules)
 - **API user key (`x-user-key`)**: main accounts use the user's own main-account API user-key; agent-portfolios use the agent-portfolio's `userToken` from the creation flow.
 - **Environment**: a main-account user-key is bound to one environment (real or demo) at creation — the agent determines which by probing, never asks the user. Agent-portfolios are always real.
 
-Everything else — endpoints, headers (including the canonical `x-api-key`), rate limits, the 60-second PnL cache, validation rules, retry strategies — is identical.
+Everything else — endpoints, headers (including the canonical `x-api-key`), rate limits, the 10-second PnL cache, validation rules, retry strategies — is identical.
 
 ## Official eToro API documentation
 

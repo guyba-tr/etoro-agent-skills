@@ -11,7 +11,7 @@ Use this skill when the user wants to **create or operate an agent-portfolio**. 
 
 ## What's different about agent-portfolios
 
-Trade execution against an agent-portfolio uses identical infrastructure to a main account: same Public API endpoints, same headers, same rate limits, same 60-second PnL cache, same workflows (single trade, bulk, rebalance, conditional rules). The only execution difference is that the `x-user-key` header carries the agent-portfolio's `userToken` (from creation; see `references/onboarding.md`) instead of the user's main-account key.
+Trade execution against an agent-portfolio uses identical infrastructure to a main account: same Public API endpoints, same headers, same rate limits, same 10-second PnL cache, same workflows (single trade, bulk, rebalance, conditional rules). The only execution difference is that the `x-user-key` header carries the agent-portfolio's `userToken` (from creation; see `references/onboarding.md`) instead of the user's main-account key.
 
 What's specific to agent-portfolios:
 

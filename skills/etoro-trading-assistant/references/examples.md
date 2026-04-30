@@ -24,12 +24,10 @@ USER: I want to buy $1,000 of AAPL.
 
 3. *Pre-flight cash* (Step 3). Read `/pnl` for the active environment (per `api-conventions.md` "Demo vs. real environments" — the env was already determined the first time the agent hit `/pnl` this session). Compute Available Cash via `account-snapshot.md` §1 → $5,237. $1,000 ≤ $5,237 → proceed.
 
-4. *Confirm with the user* (Step 4) — flag the ~1-minute verification wait up front:
+4. *Confirm with the user* (Step 4) — total elapsed ~15 seconds, no expectation-setting needed:
 
 ```
-ASSISTANT: Ready to place: buying $1,000 of AAPL at market, leverage 1× (no leverage).
-I'll place the order and confirm the result in about a minute.
-Proceed?
+ASSISTANT: Ready to place: buying $1,000 of AAPL at market, leverage 1× (no leverage). Proceed?
 
 USER: yes
 ```
@@ -43,7 +41,7 @@ USER: yes
 
 6. *Wait then verify* (Step 6).
 
-   - `sleep(60_000)` — the `/pnl` endpoint is cached for 60 s and the cache covers `positions[]` / `ordersForOpen[]`; reading earlier returns the pre-trade snapshot (see `account-snapshot.md` §1 "60-second response cache").
+   - `sleep(10_000)` — the `/pnl` endpoint is cached for 10 s and the cache covers `positions[]` / `ordersForOpen[]`; reading earlier returns the pre-trade snapshot (see `account-snapshot.md` §1 "10-second response cache").
    - Re-read `/pnl`. New AAPL entry in `clientPortfolio.positions[]` at $1,000 / 5.57 units / `openRate` $179.50. Filled.
 
 7. *Report back* (Step 7) — single bottom-line message after the wait, in the user's framing (dollars + units), with cash-impact side effect:
@@ -52,15 +50,16 @@ USER: yes
 ASSISTANT: Bought $1,000 of AAPL at $179.50 (5.57 units). Available cash dropped from $5,237 to $4,237.
 ```
 
-The user sees one short message during execution (Step 4 confirmation, with the "about a minute" expectation) and one bottom-line message after verification (Step 7). No interim "Order placed; verifying…" — just stay quiet and deliver the verified result.
+Two messages total: the Step 4 confirmation and the Step 7 verified result. ~15 seconds of silence in between (POST round-trip + 10 s cache wait + verification read) — short enough that no interim message is needed.
 
 ### What you do NOT see in this example
 
 - **No "real or demo?" question.** The user-key is bound to one environment at creation; the agent already knows. (`api-conventions.md` "Demo vs. real environments".)
+- **No expectation-setting line in the confirmation.** Total wait is ~15 s — too short to feel like a hang, so no "I'll confirm in a few seconds" needed. (For longer workflows like bulk builds and rebalances, set expectations in the confirmation; see Examples 2 and 5.)
 - **No anchor freeze ceremony.** For a single dollar-form trade with explicit cash pre-flight, the workflow doesn't need a frozen `EQUITY_ANCHOR` (the dollar amount IS the user's intent, not a derived one). If the user had said *"buy 5% of equity in AAPL"*, the agent would freeze `EQUITY_ANCHOR` at the start of Step 3, compute `amount_usd = floor(0.05 × EQUITY_ANCHOR × 100) / 100`, and verify the fill against that anchor (`execution-invariants.md` §§1–2).
 - **No second-guessing on a 200 response.** The agent does not re-fire the same payload "to be safe" — that's the at-most-once rule.
-- **No early `/pnl` read.** Verifying before the cache refreshes would show the *pre-trade* snapshot (no AAPL in `positions[]`) and produce a false "trade didn't land" report. The 60 s wait is what makes the verified report trustworthy.
-- **No two-message pattern.** The agent does not say *"Order placed; verifying…"* and then follow up. The user gets the Step 4 expectation-set ("about a minute") and the Step 7 verified result — nothing in between.
+- **No early `/pnl` read.** Verifying before the cache refreshes would show the *pre-trade* snapshot (no AAPL in `positions[]`) and produce a false "trade didn't land" report. The 10 s wait is what makes the verified report trustworthy.
+- **No two-message pattern.** The agent does not say *"Order placed; verifying…"* and then follow up. The user gets the Step 4 confirmation and the Step 7 verified result — nothing in between.
 
 ---
 
@@ -121,7 +120,7 @@ ASSISTANT: I'll open 7 positions on your agent-portfolio:
   - SOL:     5%
   - (cash):  5%
 
-Total allocated: 95%. Estimated time about 90 seconds.
+Total allocated: 95%. Estimated time about 30 seconds.
 
 Proceed?
 
@@ -142,9 +141,9 @@ Per-trade outcomes captured as `'ok' | 'failed' | 'ambiguous' | 'rate_limited_gi
 | NVDA ($984.72) | timeout, no response — `ambiguous` (do NOT retry) |
 | SOL ($492.36) | 200, orderId — `ok` |
 
-### Phase 5 — wait 60s, verify (`bulk-trading.md` §5)
+### Phase 5 — wait 10s, verify (`bulk-trading.md` §5)
 
-Internal: sleep 60s → `GET /trading/info/real/pnl`.
+Internal: sleep 10s → `GET /trading/info/real/pnl`.
 
 For each trade, look in `positions[]` (filled) or `ordersForOpen[]` (pending market open):
 
@@ -263,11 +262,11 @@ Why each line is wrong:
 
 ```
 ASSISTANT: I'll close all 10 of your open positions. Estimated time
-about 90 seconds. Proceed?
+about 40 seconds. Proceed?
 
 USER: yes
 
-[~90 seconds of silence — agent executes, recovers from any payload
+[~40 seconds of silence — agent executes, recovers from any payload
  or path issues silently, retries 429s silently, waits the cache out
  silently, verifies silently]
 
@@ -275,7 +274,7 @@ ASSISTANT: Done — all 10 positions closed. Your portfolio is now 100%
 cash.
 ```
 
-Note the time estimate is **one customer-friendly number** ("about 90 seconds"). It is **not** broken down into "~30s of paced execution + 60s wait for the PnL cache" or any other mechanism explanation. The breakdown exists in the agent's planner; it does not exist in the user-facing message.
+Note the time estimate is **one customer-friendly number** ("about 40 seconds"). It is **not** broken down into "~30s of paced execution + 10s wait for the PnL cache" or any other mechanism explanation. The breakdown exists in the agent's planner; it does not exist in the user-facing message.
 
 Two messages, total. One sets expectations and asks for consent. One delivers the verified bottom line.
 
@@ -285,7 +284,7 @@ The agent does the **same internal work** in both cases:
 - Resolves the close endpoint shape and required fields
 - Paces ≥ 3s between POSTs (per `bulk-trading.md` §4)
 - Recovers silently if a request returns 4xx with a fixable payload error (within at-most-once: a payload-shape fix is a *different* request, not a retry of the same one — so it's allowed)
-- Waits 60s for the cache (per `account-snapshot.md` §1 "60-second response cache")
+- Waits 10s for the cache (per `account-snapshot.md` §1 "10-second response cache")
 - Reads `/pnl` and confirms 0 open positions remaining
 
 What changes is **what the agent says out loud about that work**. In the good version: nothing. In the bad version: all of it.
@@ -304,7 +303,7 @@ In all other cases — payload fixes, endpoint-path discovery, 429 backoffs, amb
 
 ## Example 5 — Rebalance on an agent-portfolio (silence + Override A enforcement)
 
-**Scenario:** the user has 5 existing positions on an agent-portfolio and asks to add XRP. The agent proposes a rebalance plan (scale all 5 down proportionally to free room for a new XRP position). This is a **multi-step workflow** taking ~2½ minutes (closes → cache wait → opens → cache wait → verify), which is the longest workflow in the system. The temptation to "keep the user updated" mid-flow is highest here — and that's exactly when the agent must resist hardest.
+**Scenario:** the user has 5 existing positions on an agent-portfolio and asks to add XRP. The agent proposes a rebalance plan (scale all 5 down proportionally to free room for a new XRP position). This is a **multi-step workflow** taking about a minute (closes → cache wait → opens → cache wait → verify), the longest workflow in the system. The temptation to "keep the user updated" mid-flow is highest here — and that's exactly when the agent must resist hardest.
 
 This example also enforces **Override A** (agent-portfolio dollar amounts are NEVER customer-facing). Mid-workflow status pings on agent-portfolios commonly leak dollars (*"Cash freed: $2,012.97"*) — which is **two violations stacked**: a status ping that shouldn't exist at all, in dollars on an account where dollars shouldn't be shown.
 
@@ -330,7 +329,7 @@ Target allocation:
   • Cash:  5%
 
 That keeps the same relative ranking while carving out XRP's 20%.
-This will involve partial closes on all 5 existing positions, a 60-second
+This will involve partial closes on all 5 existing positions, a 10-second
 wait for settlement, then opening XRP.
 
 Good to go, or want different weights?
@@ -338,7 +337,7 @@ Good to go, or want different weights?
 USER: yes
 
 A: Executing the rebalance. Phase 1: partial closes on all 5
-positions, then 60s wait, then open XRP.
+positions, then 10s wait, then open XRP.
 
 A: All 5 closes landed. Cash freed: $2,012.97. Now executing Phase 2:
 open XRP.
@@ -348,7 +347,7 @@ A: All clear. XRP filled at the 20% target. Portfolio rebalanced.
 
 What's wrong with each piece:
 
-- **The plan message** is mostly fine, but *"a 60-second wait for settlement, then opening XRP"* leaks the cache wait as a mechanism. Reword: *"The full sequence takes about 2½ minutes."* — one customer-friendly number, no mechanism.
+- **The plan message** is mostly fine, but *"a 10-second wait for settlement, then opening XRP"* leaks the cache wait as a mechanism. Reword: *"The full sequence takes about a minute."* — one customer-friendly number, no mechanism.
 - **"Executing the rebalance. Phase 1: …"** — pure mechanism narration. The user said yes; no mid-flow status ping needed at all.
 - **"All 5 closes landed. Cash freed: $2,012.97. Now executing Phase 2: open XRP."** — three violations stacked: (1) mid-flow status ping that shouldn't exist, (2) "Phase 1 / Phase 2" workflow-step labels surfacing internal structure, (3) **dollar amount on an agent-portfolio**, which is a hard Override A violation.
 - **"All clear. XRP filled at the 20% target. Portfolio rebalanced."** — this is the only message the user actually needed, and it could be even tighter.
@@ -368,11 +367,11 @@ ASSISTANT: Here's how I'd redistribute to make room for XRP at 20%
   • Cash:  5%
 
 Same relative ranking, carving out 20% for XRP. Estimated time about
-2½ minutes. Good to go, or want different weights?
+a minute. Good to go, or want different weights?
 
 USER: yes
 
-[~2½ minutes of silence — agent runs Phase 1 closes, waits the cache,
+[~1 minute of silence — agent runs Phase 1 closes, waits the cache,
  runs Phase 2 opens, waits the cache, verifies — all silently. The
  user gets nothing in this window.]
 
@@ -384,7 +383,7 @@ Two messages, total. One asks for consent with a customer-friendly time estimate
 
 ### Notes
 
-- **Estimated time** in the confirmation is *"about 2½ minutes"*, not *"~25s of close pacing + 60s PnL-cache wait + ~10s of open pacing + 60s PnL-cache wait before final verification"* (the breakdown in `rebalancing.md` §4 exists for the agent's planner; it does not exist for the user).
+- **Estimated time** in the confirmation is *"about a minute"*, not *"~25s of close pacing + 10s PnL-cache wait + ~10s of open pacing + 10s PnL-cache wait before final verification"* (the breakdown in `rebalancing.md` §4 exists for the agent's planner; it does not exist for the user).
 - **No "Phase 1 / Phase 2" labels** in user-facing messages — those are internal terminology from `rebalancing.md` §3. Customer-facing language: *"close some, open some"*, or just don't mention the structure at all (the user knows it's a rebalance because they asked for one).
 - **No dollar amounts** on agent-portfolios, ever. *"Cash freed: $2,012.97"* is a hard Override A violation. The internal `liveCash ≥ Σ planned_opens` check (`rebalancing.md` §6) uses dollars; the customer-facing report uses percentages. Translation happens at the call site, every time.
 - **The confirmation message can name the close-buffer reason in plain language** if the over-close is large enough to be noticeable — *"freeing about 3% of cash (a small extra so we don't land short)"* is fine. Saying *"plus a 0.03% safety buffer to avoid a corrective second close-then-wait round"* is not — that names the mechanism.

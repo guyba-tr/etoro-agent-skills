@@ -2,7 +2,7 @@
 
 Reference for the `etoro-trading-assistant` skill. Load this when the user wants to move their portfolio from its current allocation to a new target — explicitly ("rebalance to my model"), implicitly ("swap MSFT for NVDA at the same size"), or on a recurring schedule. Also load it when a single new trade hits a cash shortfall.
 
-The execution borrows directly from `bulk-trading.md`; the new content here is the **diff calculation** and **phase orchestration** (close-phase + 60-second cache wait + open-phase, sharing the 20 req/min rate-limit budget across both).
+The execution borrows directly from `bulk-trading.md`; the new content here is the **diff calculation** and **phase orchestration** (close-phase + 10-second cache wait + open-phase, sharing the 20 req/min rate-limit budget across both).
 
 ---
 
@@ -10,7 +10,7 @@ The execution borrows directly from `bulk-trading.md`; the new content here is t
 
 This workflow applies to **both main eToro accounts and agent-portfolios**. Examples below use **dollar amounts** — the main-account default.
 
-> **Agent-portfolio override:** if you reached this reference from the `etoro-agent-portfolios` skill, apply **Override A** from that skill — replace dollar amounts with **percentages of equity** in every user-facing message. Internally compute `amount_usd = pct × EQUITY_ANCHOR` for the API calls. Endpoint shapes, validation rules, phase ordering, the 60-second cache wait, and the 20 req/min rate limit are all identical.
+> **Agent-portfolio override:** if you reached this reference from the `etoro-agent-portfolios` skill, apply **Override A** from that skill — replace dollar amounts with **percentages of equity** in every user-facing message. Internally compute `amount_usd = pct × EQUITY_ANCHOR` for the API calls. Endpoint shapes, validation rules, phase ordering, the 10-second cache wait, and the 20 req/min rate limit are all identical.
 
 ---
 
@@ -40,7 +40,7 @@ close_buffer     = ceil(shortfall × 0.01 × 100) / 100   // 1% of shortfall, ro
 close_target     = shortfall + close_buffer
 ```
 
-**Why the buffer.** This is the mirror image of the ceiling-on-opens rule (`execution-invariants.md` §2): closes round **UP**, opens round **DOWN**. Without the buffer, a tiny mismatch — partial-close `UnitsToDeduct` rounding to whole units, or post-close fees nibbling the freed cash — can leave you 0.X% short and force a corrective second close-then-wait-60s round. Closing 1% of the shortfall over what's strictly needed eliminates that failure mode while leaving negligible cash idle.
+**Why the buffer.** This is the mirror image of the ceiling-on-opens rule (`execution-invariants.md` §2): closes round **UP**, opens round **DOWN**. Without the buffer, a tiny mismatch — partial-close `UnitsToDeduct` rounding to whole units, or post-close fees nibbling the freed cash — can leave you 0.X% short and force a corrective second close-then-wait-10s round. Closing 1% of the shortfall over what's strictly needed eliminates that failure mode while leaving negligible cash idle.
 
 **Direction of rounding:** the buffer is rounded UP (`ceil`), and per-position close amounts must sum to ≥ `close_target`. In the close phase we err toward more freed cash; in the open phase we err toward less spent cash.
 
@@ -62,9 +62,9 @@ Always **confirm the close plan with the user** in approval mode. Even in auto-r
 From here the flow is identical to a standard rebalance — reuse §§ 5–8 below:
 
 - **Phase 1** (§ 5) — execute the partial closes; rate-limit budget shared across both phases.
-- **Wait 60 seconds** for the PnL cache to refresh (§ 6).
+- **Wait 10 seconds** for the PnL cache to refresh (§ 6).
 - **Verify** the freed cash equals the shortfall (§ 6).
-- **Phase 2** (§ 7) — execute the original open(s). If the user only asked for one new trade, Phase 2 is a single POST. The phase ordering and 60s cache wait still apply.
+- **Phase 2** (§ 7) — execute the original open(s). If the user only asked for one new trade, Phase 2 is a single POST. The phase ordering and 10s cache wait still apply.
 - **Verify final state** (§ 8).
 
 ### D. Communicate the trade-off to the user
@@ -77,7 +77,7 @@ beyond $300 so we don't land short).
 I'll partially close MSFT (currently worth $1,200, reducing to ~$897) to fund this.
 
 Net effect: AAPL +$1,500, MSFT −$303.
-Estimated time: about 2½ minutes.
+Estimated time: about 30 seconds.
 
 Proceed?
 ```
@@ -90,12 +90,12 @@ To open AAPL at 5%, I need to free about 3% of cash (a small extra beyond
 I'll partially close MSFT (currently 12% → ~9%) to fund this.
 
 Net effect: AAPL +5%, MSFT −3%.
-Estimated time: about 2½ minutes.
+Estimated time: about 30 seconds.
 
 Proceed?
 ```
 
-This avoids the surprise of "I asked to open AAPL, why did MSFT shrink?" — the user always sees the cause-and-effect before confirming. **The estimated time is one customer-friendly number; never broken down into "two 60s cache waits", "Phase 1 / Phase 2", or any other mechanism explanation** (per `etoro-trading-assistant/SKILL.md` "Talk in bottom lines, not mechanics").
+This avoids the surprise of "I asked to open AAPL, why did MSFT shrink?" — the user always sees the cause-and-effect before confirming. **The estimated time is one customer-friendly number; never broken down into "two cache waits", "Phase 1 / Phase 2", or any other mechanism explanation** (per `etoro-trading-assistant/SKILL.md` "Talk in bottom lines, not mechanics").
 
 ---
 
@@ -103,7 +103,7 @@ This avoids the surprise of "I asked to open AAPL, why did MSFT shrink?" — the
 
 Freeze `EQUITY_ANCHOR` and `CASH_ANCHOR` from a fresh `/pnl` read — see **`execution-invariants.md` §1** for the canonical anchor-freeze rule.
 
-These anchors stay frozen across BOTH phases of the rebalance (closes and opens). The 60s PnL-cache wait between phases re-reads cash for **execution-readiness only** (a live check that closes settled), but never re-anchors. Sizing in Phase 2 still uses `EQUITY_ANCHOR`.
+These anchors stay frozen across BOTH phases of the rebalance (closes and opens). The 10s PnL-cache wait between phases re-reads cash for **execution-readiness only** (a live check that closes settled), but never re-anchors. Sizing in Phase 2 still uses `EQUITY_ANCHOR`.
 
 Also compute, per `account-snapshot.md`:
 
@@ -220,12 +220,12 @@ Opening / increasing:
 - TSLA:  $0    → $1,500    (new position)
 - NVDA: $1,000 → $2,000    (additional order)
 
-Estimated time: about 2½ minutes.
+Estimated time: about a minute.
 
 Proceed?
 ```
 
-The estimated time is **one customer-friendly number**. **Never** break it down for the user as "~25s of close pacing + 60s PnL-cache wait + ~10s of open pacing + 60s wait before final verification" or similar — that's mechanism-narration, banned per `etoro-trading-assistant/SKILL.md` "Talk in bottom lines, not mechanics". The internal planner uses the breakdown to compute the ~2½-minute total; the user only sees the total.
+The estimated time is **one customer-friendly number**. **Never** break it down for the user as "~25s of close pacing + 10s PnL-cache wait + ~10s of open pacing + 10s wait before final verification" or similar — that's mechanism-narration, banned per `etoro-trading-assistant/SKILL.md` "Talk in bottom lines, not mechanics". The internal planner uses the breakdown to compute the ~55-second total; the user only sees the total.
 
 For agent-portfolio context, swap dollars for percentages of equity (Override A):
 
@@ -241,7 +241,7 @@ Opening / increasing:
 - TSLA:  0%  → 15%    (new position)
 - NVDA: 10%  → 20%    (increase)
 
-Estimated time: about 2½ minutes.
+Estimated time: about a minute.
 
 Proceed?
 ```
@@ -263,12 +263,12 @@ Use the same execution patterns as `bulk-trading.md` §4:
 
 ---
 
-## 6. Wait 60 seconds, then re-verify cash
+## 6. Wait 10 seconds, then re-verify cash
 
-The PnL endpoint has a 60-second cache. **Do not trust available-cash numbers until 60s after your last close.** Skipping this wait is the single biggest source of "I tried to open and got `insufficient_funds` even though I just closed enough" bugs.
+The PnL endpoint has a 10-second cache (see `account-snapshot.md` §1 "10-second response cache"). **Do not trust available-cash numbers until 10s after your last close.** Skipping this wait is the single biggest source of "I tried to open and got `insufficient_funds` even though I just closed enough" bugs.
 
 ```
-sleep(60_000)
+sleep(10_000)
 const pnl = await fetchPnl()
 const liveCash = computeAvailableCash(pnl)  // live read, NOT the frozen CASH_ANCHOR
 ```
@@ -276,7 +276,7 @@ const liveCash = computeAvailableCash(pnl)  // live read, NOT the frozen CASH_AN
 Confirm `liveCash ≥ Σ(planned_open_amounts)` (the buffer from §A "Insufficient-cash variant" should make this comfortably true — `liveCash` should land at roughly `required_cash + close_buffer`, never short). If short anyway:
 
 - **Some closes may have failed silently** — verify by checking `positions[]` against the close-plan. Any position that should have been closed but is still in `positions[]` indicates a failed close.
-- **Pending close orders** (`orders[]`) may not have settled yet — wait another 60s and re-check.
+- **Pending close orders** (`orders[]`) may not have settled yet — wait another 10s and re-check.
 - **As a last resort**: scale the open-plan proportionally to the actual available cash, OR abort with a clear message to the user explaining the shortfall.
 
 > Note: `liveCash` here is a **live read for execution-readiness**, not a new anchor. `EQUITY_ANCHOR` and `CASH_ANCHOR` from §1 remain frozen — sizing in Phase 2 still uses `EQUITY_ANCHOR`, not the post-close live equity.
@@ -287,13 +287,13 @@ Confirm `liveCash ≥ Σ(planned_open_amounts)` (the buffer from §A "Insufficie
 
 Same as `bulk-trading.md` §4, with one constraint: the rate-limit budget is **what's left** of the 20 req/min after Phase 1.
 
-If Phase 1 used 12 trade requests in the last minute, Phase 2 can fire 8 trades immediately, then must wait for the rolling-window to free up. Track this — don't assume a fresh budget after the 60s cache wait (the rate-limit window is request-time, not phase-boundary).
+If Phase 1 used 12 trade requests in the last minute, Phase 2 can fire 8 trades immediately, then must wait for the rolling-window to free up. Track this — don't assume a fresh budget after the 10s cache wait (the rate-limit window is request-time, not phase-boundary).
 
 ---
 
 ## 8. Final verification
 
-- Wait another 60s for cache refresh after the last open.
+- Wait another 10s for cache refresh after the last open.
 - Re-read PnL.
 - Compare current allocation to target.
 - Categorize each instrument as filled / pending market open / failed (see `bulk-trading.md` §5 for the categorization logic).
@@ -314,7 +314,7 @@ Current allocation matches your target within $40 (or, in agent-portfolio contex
 
 Cross-cutting invariants (covered by `execution-invariants.md`):
 
-- [ ] **Anchor freeze** — `EQUITY_ANCHOR` / `CASH_ANCHOR` frozen at workflow start (§1) and used for sizing in BOTH phases; the 60s wait re-reads cash for execution-readiness only.
+- [ ] **Anchor freeze** — `EQUITY_ANCHOR` / `CASH_ANCHOR` frozen at workflow start (§1) and used for sizing in BOTH phases; the 10s wait re-reads cash for execution-readiness only.
 - [ ] **Ceilings on opens** — `amount_usd = floor(target_pct × EQUITY_ANCHOR × 100) / 100`; over-fills surfaced and corrected.
 - [ ] **Open buffer** — if `(CASH_ANCHOR + freed_from_closes − Σ opens) / EQUITY_ANCHOR < 0.01`, each open re-floored to `× 0.99` so per-trade fees don't push displayed cash negative. On the insufficient-cash variant this is almost always triggered (and stacks with the existing close_buffer; both are kept).
 - [ ] **At-most-once on every POST in BOTH phases** — only 429 retried; 4xx/5xx/ambiguous reconciled via `/pnl`, never re-fired. Critical on closes: a duplicated partial close can over-liquidate.
@@ -327,7 +327,7 @@ Rebalance-specific:
 - [ ] **Insufficient-cash variant: `close_target = shortfall + 1% of shortfall (rounded up)`** — closes are over-shot by this small buffer to avoid landing short and triggering a corrective second round.
 - [ ] **Closes round UP** (free at least `close_target`, never less) — mirror image of the ceilings-on-opens rule.
 - [ ] Phase 1 (closes) completes BEFORE Phase 2 (opens) begins.
-- [ ] **60-second PnL cache wait between phases** — non-negotiable.
+- [ ] **10-second PnL cache wait between phases** — non-negotiable (`account-snapshot.md` §1).
 - [ ] Live cash re-verified after closes (`liveCash ≥ Σ planned_opens`); the buffer should make this comfortable — if short anyway, investigate (silent close failure? pending orders?) before proceeding.
 - [ ] Rate-limit budget tracked across BOTH phases; no assumption of a fresh 20/min after the cache wait.
 - [ ] Final state reported in the user's unit (dollars on main accounts; percentages in agent-portfolio context); pending-market-open status surfaced.

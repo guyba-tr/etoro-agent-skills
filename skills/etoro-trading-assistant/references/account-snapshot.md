@@ -72,9 +72,9 @@ Assuming **single-actor mode** (no other client opens or closes positions on thi
 
 This matters for any workflow that expresses intent as a percentage (*"30% in BTC"*). Because equity drifts, recomputing `pct × current_equity` mid-workflow produces a different dollar amount than it did at the start — making the same intent resolve to different numbers depending on timing. **For workflows requiring percentage stability, freeze `EQUITY_ANCHOR` (and `CASH_ANCHOR`) at workflow start and use them for all sizing, sufficiency, and verification.** Full statement of the anchor-freeze invariant: `execution-invariants.md` §1. Workflow-specific application: `bulk-trading.md` §2, `rebalancing.md` §1, `conditional-rules.md` §4. Agent-portfolio strict-application override: `etoro-agent-portfolios` SKILL "Override B".
 
-### 60-second response cache (rolling)
+### 10-second response cache (rolling)
 
-Independent of the underlying data's stability, the `/pnl` endpoint **caches the entire response for 60 seconds (rolling)**. This is the most consequential operational fact about the endpoint and it's easy to miss, because the URL is named for a single field while the response carries the whole `clientPortfolio`.
+Independent of the underlying data's stability, the `/pnl` endpoint **caches the entire response for 10 seconds (rolling)**. This is the most consequential operational fact about the endpoint and it's easy to miss, because the URL is named for a single field while the response carries the whole `clientPortfolio`.
 
 **The cache covers every field in the response, not just the derived aggregates:**
 
@@ -84,13 +84,13 @@ Independent of the underlying data's stability, the `/pnl` endpoint **caches the
 - `credit`, `unrealizedPnL`
 - and therefore everything derived from them (Available Cash, Total Invested, Profit/Loss, Equity from §1 above)
 
-**Practical consequence:** if the agent executes a trade and then reads `/pnl` seconds later, the response is the *pre-trade* snapshot — the just-opened position will NOT appear in `positions[]`, and the just-closed position will still be there with its old `units`. This is **not** a bug to work around with retries; it is the documented cache behavior and there is no `force-refresh` or `cache-bust` parameter.
+**Practical consequence:** if the agent executes a trade and then reads `/pnl` immediately, the response is the *pre-trade* snapshot — the just-opened position will NOT appear in `positions[]`, and the just-closed position will still be there with its old `units`. This is **not** a bug to work around with retries; it is the documented cache behavior and there is no `force-refresh` or `cache-bust` parameter.
 
-**The rule:** for any post-trade verification read (categorizing fills vs. pending vs. failed; reconciling ambiguous outcomes from `execution-invariants.md` §3; checking that closes freed enough cash for a follow-on open; computing post-trade Available Cash for the next workflow's anchor), **wait 60 seconds after the last write before reading `/pnl`**. Reading earlier returns stale data and produces false "trade didn't land" reports.
+**The rule:** for any post-trade verification read (categorizing fills vs. pending vs. failed; reconciling ambiguous outcomes from `execution-invariants.md` §3; checking that closes freed enough cash for a follow-on open; computing post-trade Available Cash for the next workflow's anchor), **wait 10 seconds after the last write before reading `/pnl`**. Reading earlier returns stale data and produces false "trade didn't land" reports.
 
 This is what justifies the explicit waits in the workflow references: `single-trade-walkthrough.md` Step 6, `bulk-trading.md` §5, `rebalancing.md` §6 + §8.
 
-**For monitoring (not verification),** the same cache means PnL-derived triggers (`conditional-rules.md` §2 `pnl_pct`) operate on data up to 60 s old — acceptable for slow strategies; use `/market-data/instruments/rates` (a different endpoint, not subject to this cache) for fast price-threshold triggers.
+**For monitoring (not verification),** the same cache means PnL-derived triggers (`conditional-rules.md` §2 `pnl_pct`) operate on data up to 10 s old — acceptable for nearly all strategies; use `/market-data/instruments/rates` (a different endpoint, not subject to this cache) for sub-second price-threshold triggers.
 
 ## 2. `position.openRate` is in the instrument's NATIVE currency
 

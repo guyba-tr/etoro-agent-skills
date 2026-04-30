@@ -89,7 +89,7 @@ Caveats from `account-snapshot.md`:
 
 - For non-USD instruments, `position.amount` is the USD margin — `pnl_pct` is correctly USD-denominated, no native-currency adjustment needed.
 - For leveraged positions, `position.amount` is the margin (cash committed), so `pnl_pct` is return-on-margin, not return-on-notional. Be explicit with the user about which one their rule means.
-- The PnL endpoint's 60s cache means PnL-based triggers fire on data that's up to 60 seconds old. Acceptable for slow strategies; use `price` rules with `lastExecution` for fast-moving thresholds.
+- The PnL endpoint's 10s cache means PnL-based triggers fire on data that's up to 10 seconds old. Acceptable for nearly all strategies; for sub-second price thresholds use `price` rules with `lastExecution` (a different endpoint, not subject to this cache).
 
 ### `external` — third-party indicators
 
@@ -108,7 +108,7 @@ Each rule has its own cadence; combine cadences across rules to plan global poll
 | Trigger kind | Recommended cadence | Reason |
 |---|---|---|
 | `price` (live) | 30–60s | `/market-data/instruments/rates` may be cached server-side; faster polling doesn't yield fresher data and burns rate-limit budget. |
-| `pnl_pct` | 60s | The PnL endpoint's own cache TTL. |
+| `pnl_pct` | 10–30s | The PnL endpoint's own cache TTL is 10s; polling at 10s gives maximum freshness, 30s is a more conservative default that still feels real-time for most strategies and uses 1/3 the rate-limit budget. |
 | `external` | Per third-party docs | Sentiment APIs typically recommend 5–15 min. |
 
 The trade-execution rate limit (20 req/min) is the hard ceiling on **action**, not on monitoring. Monitoring uses the regular Public API which has its own (more generous) limits.
@@ -239,7 +239,7 @@ Conditional-rules-specific:
 
 - [ ] Rules are stored in a structured form (not free-text), with `instrumentID` resolved at creation time.
 - [ ] User confirms the rule shape before activation; "how to pause" is communicated.
-- [ ] Live-price triggers use `/market-data/instruments/rates`; PnL-based triggers use the PnL endpoint at its 60s cadence.
+- [ ] Live-price triggers use `/market-data/instruments/rates`; PnL-based triggers use the PnL endpoint at a 10–30s cadence anchored on its 10s cache TTL.
 - [ ] Cooldown set on every rule (default 1h) to prevent rapid re-firing.
 - [ ] `max_triggers` defaulted to 5 unless user requested otherwise.
 - [ ] Pending-market-open status surfaced when the triggered trade can't fill immediately.

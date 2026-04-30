@@ -221,7 +221,7 @@ for (const trade of plan.trades) {
 
 A successful POST does **not** mean the position is open — it means the order was accepted. Three landing states are possible — and verification is **also** how the at-most-once rule resolves any `ambiguous` trades from §4.
 
-After the last execution, **wait 60 seconds** for the PnL cache to refresh, then:
+After the last execution, **wait 10 seconds** for the PnL cache to refresh (`account-snapshot.md` §1 "10-second response cache"), then:
 
 ```
 GET /trading/info/{env}/pnl
@@ -303,6 +303,6 @@ Bulk-specific:
 - [ ] All `instrumentID`s resolved up front; partial-resolution plans rejected entirely.
 - [ ] Trade-execution requests spaced ≥ 3s; 20 req/min budget tracked.
 - [ ] Other per-trade failures (400, 5xx) logged and reported but don't abort the batch.
-- [ ] Post-execution: 60s wait, then `/pnl` re-read; results categorized as filled / pending / failed / ambiguous-but-missing; ambiguous resolved by reading `positions[]`/`ordersForOpen[]`.
+- [ ] Post-execution: 10s wait, then `/pnl` re-read; results categorized as filled / pending / failed / ambiguous-but-missing; ambiguous resolved by reading `positions[]`/`ordersForOpen[]`.
 - [ ] User-facing report uses the same unit the user gave you (dollars on main accounts; percentages in agent-portfolio context); pending-market-open distinction explicitly surfaced.
 
